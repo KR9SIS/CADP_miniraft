@@ -1,1 +1,1 @@
-package miniraft
+package main

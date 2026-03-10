@@ -1,11 +1,16 @@
-package miniraft
+package main
 
 import (
-	"fmt"
+	"log"
+	"net"
 	"os"
+	"strings"
 )
 
 type RaftServer struct {
+	id string
+	// identity:port string
+
 	// INFO: Persistent
 	currentTerm int
 	// latest term server has seen
@@ -27,5 +32,32 @@ type RaftServer struct {
 	// for each server, index of highest log entry known to be replicated on server
 }
 
+
 func main() {
+	if len(os.Args) != 3 {
+		log.Fatalf("Usage: %s <host>:<port> <server id file>\n", os.Args[0])
+	}
+	id := os.Args[1]
+	file := os.Args[2]
+
+	data, err := os.ReadFile(file)
+	if err != nil {
+		log.Fatalf("Error reading %s: %v", id, err)
+	}
+
+	dataStr := string(data)
+	if !strings.Contains(dataStr, id) {
+		log.Fatalf("\"%s\" must be in %s\nContents of %s:\n%s", id, file, file, data)
+	}
+
+	sCount := strings.Count(dataStr, "\n")
+
+	serv := &RaftServer{
+		id:         id,
+		log:        make([]string, 16),
+		nextIndex:  make([]int, sCount),
+		matchIndex: make([]int, sCount),
+	}
+
+	serv.serve()
 }
