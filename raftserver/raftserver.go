@@ -7,6 +7,9 @@ import (
 	"strings"
 )
 
+// 4 Bytes for header, 1296 for data
+const maxBufferSize = 1300
+
 type RaftServer struct {
 	id string
 	// identity:port string
@@ -32,6 +35,26 @@ type RaftServer struct {
 	// for each server, index of highest log entry known to be replicated on server
 }
 
+func (serv *RaftServer) serve() (err error) {
+	addr, err := net.ResolveUDPAddr("udp", serv.id)
+	if err != nil {
+		log.Fatalf("error resolving %s: %v\n", serv.id, err)
+	}
+	serverConn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		log.Fatalf("failed to listen on port %d: %v\n", addr.Port, err)
+	}
+	buffer := make([]byte, maxBufferSize)
+	log.Printf("%s listening", serv.id)
+	for {
+		n, addr, err := serverConn.ReadFromUDP(buffer)
+		if err != nil {
+			log.Printf("error recvieving %d bytes from %s: %v\n", n, addr, err)
+			continue
+		}
+		log.Printf("recieved \"%s\" from %s", buffer[0:n], addr)
+	}
+}
 
 func main() {
 	if len(os.Args) != 3 {
@@ -47,7 +70,7 @@ func main() {
 
 	dataStr := string(data)
 	if !strings.Contains(dataStr, id) {
-		log.Fatalf("\"%s\" must be in %s\nContents of %s:\n%s", id, file, file, data)
+		log.Fatalf("\"%s\" must be in %s\nContents of %s:\n%s\n", id, file, file, data)
 	}
 
 	sCount := strings.Count(dataStr, "\n")
