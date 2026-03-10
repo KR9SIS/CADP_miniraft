@@ -5,6 +5,8 @@ import (
 	"net"
 	"os"
 	"strings"
+
+	"github.com/KR9SIS/CADP_miniraft/msg_format"
 )
 
 // 4 Bytes for header, 1296 for data
@@ -19,7 +21,7 @@ type RaftServer struct {
 	// latest term server has seen
 	votedFor bool
 	// candidateId that recieved vote in current term (or null if none)
-	log []string
+	log []miniraft.LogEntry
 	// log entries; each entry contains command for state machine, and term when entry was recieved by leader (first index is 1)
 
 	// INFO: Volatile
@@ -77,7 +79,7 @@ func main() {
 
 	serv := &RaftServer{
 		id:         id,
-		log:        make([]string, 16),
+		log:        make([]miniraft.LogEntry, 16),
 		nextIndex:  make([]int, sCount),
 		matchIndex: make([]int, sCount),
 	}
