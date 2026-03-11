@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/KR9SIS/CADP_miniraft/msg_format"
@@ -24,7 +25,7 @@ type RaftServer struct {
 	eTimeout *time.Ticker
 
 	// INFO: Persistent
-	currentTerm int
+	currentTerm atomic.Int64
 	// latest term server has seen
 	votedFor string
 	// candidateId that recieved vote in current term (or null if none)
@@ -32,15 +33,15 @@ type RaftServer struct {
 	// log entries; each entry contains command for state machine, and term when entry was recieved by leader (first index is 1)
 
 	// INFO: Volatile
-	commitIndex int
+	commitIndex atomic.Int64
 	// index of highest log entry known to be committed
-	lastApplied int
+	lastApplied atomic.Int64
 	// index of highest log entry applied to state machine
 
 	// INFO: Leader vars
-	nextIndex []int
+	nextIndex []atomic.Int64
 	// for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
-	matchIndex []int
+	matchIndex []atomic.Int64
 	// for each server, index of highest log entry known to be replicated on server
 }
 
@@ -72,14 +73,14 @@ func (serv *RaftServer) sendMsg(message any, addr *net.UDPAddr) {
 // commitIndex = min(leaderCommit, index of last new entry)
 func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest) miniraft.AppendEntriesResponse {
 	resp := miniraft.AppendEntriesResponse{
-		Term: serv.currentTerm,
+		Term: int(serv.currentTerm.Load()),
 	}
 	if len(req.LogEntries) == 0 {
 		resp.Success = true // Heartbeat
 		serv.resetTimeout()
 		return resp
 	}
-	if req.Term < serv.currentTerm {
+	if req.Term < int(serv.currentTerm.Load()) {
 		resp.Success = false // 1.
 		return resp
 	}
@@ -96,8 +97,8 @@ func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest) minir
 		serv.log = append(serv.log, req.LogEntries...) // 4.
 	}
 	resp.Success = true
-	if serv.commitIndex < req.LeaderCommit {
-		serv.commitIndex = min(req.LeaderCommit, len(serv.log)-1) // 5.
+	if int(serv.commitIndex.Load()) < req.LeaderCommit {
+		serv.commitIndex.Store(int64(min(req.LeaderCommit, len(serv.log)-1))) // 5.
 	}
 	return resp
 }
@@ -108,13 +109,13 @@ func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest) minir
 // Candidate's log is at least as up-to-date as reciver's log, grant vote
 func (serv *RaftServer) handleRVRequest(req miniraft.RequestVoteRequest, addr *net.UDPAddr) miniraft.RequestVoteResponse {
 	resp := miniraft.RequestVoteResponse{
-		Term: serv.currentTerm,
+		Term: int(serv.currentTerm.Load()),
 	}
-	if req.Term < serv.currentTerm {
+	if req.Term < int(serv.currentTerm.Load()) {
 		resp.VoteGranted = false
 	} else if (serv.votedFor != "") && (serv.votedFor != addr.String()) {
 		resp.VoteGranted = false
-	} else if req.LastLogIndex < serv.lastApplied {
+	} else if req.LastLogIndex < int(serv.lastApplied.Load()) {
 		resp.VoteGranted = false
 	} else {
 		serv.resetTimeout()
@@ -194,8 +195,8 @@ func main() {
 		addr:       addr,
 		logFile:    f,
 		log:        make([]miniraft.LogEntry, 16),
-		nextIndex:  make([]int, sCount),
-		matchIndex: make([]int, sCount),
+		nextIndex:  make([]atomic.Int64, sCount),
+		matchIndex: make([]atomic.Int64, sCount),
 	}
 
 	serv.serve()
