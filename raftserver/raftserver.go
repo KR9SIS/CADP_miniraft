@@ -2,10 +2,12 @@ package main
 
 import (
 	"log"
+	"math/rand"
 	"net"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/KR9SIS/CADP_miniraft/msg_format"
 )
@@ -18,6 +20,8 @@ type RaftServer struct {
 	// identity:port string
 	addr    *net.UDPAddr
 	logFile *os.File
+
+	eTimeout *time.Ticker
 
 	// INFO: Persistent
 	currentTerm int
@@ -70,6 +74,11 @@ func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest) minir
 	resp := miniraft.AppendEntriesResponse{
 		Term: serv.currentTerm,
 	}
+	if len(req.LogEntries) == 0 {
+		resp.Success = true // Heartbeat
+		serv.resetTimeout()
+		return resp
+	}
 	if req.Term < serv.currentTerm {
 		resp.Success = false // 1.
 		return resp
@@ -108,6 +117,7 @@ func (serv *RaftServer) handleRVRequest(req miniraft.RequestVoteRequest, addr *n
 	} else if req.LastLogIndex < serv.lastApplied {
 		resp.VoteGranted = false
 	} else {
+		serv.resetTimeout()
 		resp.VoteGranted = true
 	}
 	return resp
@@ -137,6 +147,16 @@ func (serv *RaftServer) serve() (err error) {
 		}
 		log.Printf("recieved \"%s\" from %s", buffer[0:n], addr)
 	}
+}
+
+func (serv *RaftServer) resetTimeout() {
+	// generate timeout in the range 150 to 300
+	timeout := strconv.Itoa(rand.Intn(300-150)+150) + "ms"
+	d, err := time.ParseDuration(timeout)
+	if err != nil {
+		serv.resetTimeout() // Try again
+	}
+	serv.eTimeout.Reset(d)
 }
 
 func main() {
