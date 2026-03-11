@@ -4,6 +4,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/KR9SIS/CADP_miniraft/msg_format"
@@ -16,6 +17,7 @@ type RaftServer struct {
 	id string
 	// identity:port string
 	addr *net.UDPAddr
+	logFile *os.File
 
 	// INFO: Persistent
 	currentTerm int
@@ -36,6 +38,15 @@ type RaftServer struct {
 	// for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
 	matchIndex []int
 	// for each server, index of highest log entry known to be replicated on server
+}
+
+func (serv *RaftServer) logEntry(entry miniraft.LogEntry) (err error) {
+	term := strconv.Itoa(entry.Term)
+	idx := strconv.Itoa(entry.Index)
+	if _, err := serv.logFile.Write([]byte(term + "," + idx + "," + entry.CommandName)); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (serv *RaftServer) serve() (err error) {
@@ -77,9 +88,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("error resolving %s: %v\n", id, err)
 	}
+
+	// filename = server-host-port.log
+	filename := "server-" + addr.IP.String() + "-" + strconv.Itoa(addr.Port) + ".log"
+	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Fatalf("error reading %s file: %v", filename, err)
+	}
+	defer f.Close()
 	serv := &RaftServer{
 		id:         id,
 		addr:       addr,
+		logFile:    f,
 		log:        make([]miniraft.LogEntry, 16),
 		nextIndex:  make([]int, sCount),
 		matchIndex: make([]int, sCount),
