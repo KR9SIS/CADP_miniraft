@@ -16,7 +16,7 @@ const maxBufferSize = 1300
 type RaftServer struct {
 	id string
 	// identity:port string
-	addr *net.UDPAddr
+	addr    *net.UDPAddr
 	logFile *os.File
 
 	// INFO: Persistent
@@ -40,6 +40,21 @@ type RaftServer struct {
 	// for each server, index of highest log entry known to be replicated on server
 }
 
+func (serv *RaftServer) sendMsg(message any, addr *net.UDPAddr) {
+	rMsg := miniraft.RaftMessage{
+		Message: message,
+	}
+	bMsg, err := rMsg.MarshalRaftJson()
+	if err != nil {
+		log.Printf("error marshalling response to %s\nresponse: %v\nerror: %v", addr.String(), message, err)
+	}
+	conn, err := net.DialUDP("udp", serv.addr, addr)
+	if err != nil {
+		log.Fatalf("Could not dial %v to UDP address\n", addr)
+	}
+	defer conn.Close()
+	conn.Write(bMsg)
+}
 func (serv *RaftServer) logEntry(entry miniraft.LogEntry) (err error) {
 	term := strconv.Itoa(entry.Term)
 	idx := strconv.Itoa(entry.Index)
