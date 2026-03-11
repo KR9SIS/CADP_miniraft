@@ -55,6 +55,44 @@ func (serv *RaftServer) sendMsg(message any, addr *net.UDPAddr) {
 	defer conn.Close()
 	conn.Write(bMsg)
 }
+
+// INFO:
+// 1. Reply false if term < currentTerm
+// 2. Reply false if log doesn't contain an entry
+// at PrevLogIndex whose term matches PrevLogTerm
+// 3. If an existing entry conflicts with a new one
+// (same index different terms), delete the entry and
+// all that follow it.
+// 4. Append any new entries not already in the log
+// 5. If leaderCommit > commitIndex, set
+// commitIndex = min(leaderCommit, index of last new entry)
+func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest) miniraft.AppendEntriesResponse {
+	resp := miniraft.AppendEntriesResponse{
+		Term: serv.currentTerm,
+	}
+	if req.Term < serv.currentTerm {
+		resp.Success = false // 1.
+		return resp
+	}
+	if req.PrevLogIndex <= len(serv.log)-1 {
+		pLE := serv.log[req.PrevLogIndex]
+		if pLE.Term != req.PrevLogTerm {
+			resp.Success = false // 2.
+			return resp
+		}
+	}
+	if req.LeaderCommit <= len(serv.log)-1 {
+		serv.log = append(serv.log[req.LeaderCommit:], req.LogEntries...) // 3. & 4.
+	} else {
+		serv.log = append(serv.log, req.LogEntries...) // 4.
+	}
+	resp.Success = true
+	if serv.commitIndex < req.LeaderCommit {
+		serv.commitIndex = min(req.LeaderCommit, len(serv.log)-1) // 5.
+	}
+	return resp
+}
+
 // INFO:
 // 1. Reply false if term < currentTerm
 // 2. If (votedFor is null or candidateId) and
