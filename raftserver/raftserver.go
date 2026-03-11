@@ -15,6 +15,7 @@ const maxBufferSize = 1300
 type RaftServer struct {
 	id string
 	// identity:port string
+	addr *net.UDPAddr
 
 	// INFO: Persistent
 	currentTerm int
@@ -38,13 +39,9 @@ type RaftServer struct {
 }
 
 func (serv *RaftServer) serve() (err error) {
-	addr, err := net.ResolveUDPAddr("udp", serv.id)
+	serverConn, err := net.ListenUDP("udp", serv.addr)
 	if err != nil {
-		log.Fatalf("error resolving %s: %v\n", serv.id, err)
-	}
-	serverConn, err := net.ListenUDP("udp", addr)
-	if err != nil {
-		log.Fatalf("failed to listen on port %d: %v\n", addr.Port, err)
+		log.Fatalf("failed to listen on port %d: %v\n", serv.addr.Port, err)
 	}
 	buffer := make([]byte, maxBufferSize)
 	log.Printf("%s listening", serv.id)
@@ -76,9 +73,13 @@ func main() {
 	}
 
 	sCount := strings.Count(dataStr, "\n")
-
+	addr, err := net.ResolveUDPAddr("udp", id)
+	if err != nil {
+		log.Fatalf("error resolving %s: %v\n", id, err)
+	}
 	serv := &RaftServer{
 		id:         id,
+		addr:       addr,
 		log:        make([]miniraft.LogEntry, 16),
 		nextIndex:  make([]int, sCount),
 		matchIndex: make([]int, sCount),
