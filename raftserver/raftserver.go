@@ -22,7 +22,7 @@ type RaftServer struct {
 	// INFO: Persistent
 	currentTerm int
 	// latest term server has seen
-	votedFor bool
+	votedFor string
 	// candidateId that recieved vote in current term (or null if none)
 	log []miniraft.LogEntry
 	// log entries; each entry contains command for state machine, and term when entry was recieved by leader (first index is 1)
@@ -55,6 +55,26 @@ func (serv *RaftServer) sendMsg(message any, addr *net.UDPAddr) {
 	defer conn.Close()
 	conn.Write(bMsg)
 }
+// INFO:
+// 1. Reply false if term < currentTerm
+// 2. If (votedFor is null or candidateId) and
+// Candidate's log is at least as up-to-date as reciver's log, grant vote
+func (serv *RaftServer) handleRVRequest(req miniraft.RequestVoteRequest, addr *net.UDPAddr) miniraft.RequestVoteResponse {
+	resp := miniraft.RequestVoteResponse{
+		Term: serv.currentTerm,
+	}
+	if req.Term < serv.currentTerm {
+		resp.VoteGranted = false
+	} else if (serv.votedFor != "") && (serv.votedFor != addr.String()) {
+		resp.VoteGranted = false
+	} else if req.LastLogIndex < serv.lastApplied {
+		resp.VoteGranted = false
+	} else {
+		resp.VoteGranted = true
+	}
+	return resp
+}
+
 func (serv *RaftServer) logEntry(entry miniraft.LogEntry) (err error) {
 	term := strconv.Itoa(entry.Term)
 	idx := strconv.Itoa(entry.Index)
