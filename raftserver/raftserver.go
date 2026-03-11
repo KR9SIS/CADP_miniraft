@@ -85,6 +85,35 @@ func (serv *RaftServer) sendMsg(message any, addr *net.UDPAddr) {
 	conn.Write(bMsg)
 }
 
+func (serv *RaftServer) sendAERequest(nextIndex int, addr *net.UDPAddr) {
+	aer := &miniraft.AppendEntriesRequest{
+		Term:         int(serv.currentTerm.Load()),
+		PrevLogIndex: nextIndex - 1,
+		PrevLogTerm:  serv.log[nextIndex-1].Term,
+		LeaderId:     serv.id,
+		LeaderCommit: nextIndex,
+		LogEntries:   serv.log[nextIndex:],
+	}
+	serv.sendMsg(aer, addr)
+}
+
+// INFO:
+// 1. If request was successful, update followers nextIndex
+// 2. If not, decrease followers nextIndex and try again
+func (serv *RaftServer) handleAEResponse(res miniraft.AppendEntriesResponse, addr *net.UDPAddr) {
+	// WARN: Maybe not completely done
+	i := serv.getServerIdx(addr.Port)
+	if res.Success {
+		serv.nextIndex[i].Store(serv.commitIndex.Load()) // 1.
+		return
+	}
+	serv.nextIndex[i].Store(int64(serv.nextIndex[i].Add(-1)))
+	if serv.nextIndex[i].Load() < 0 {
+		serv.nextIndex[i].Store(0)
+	}
+	serv.sendAERequest(int(serv.nextIndex[i].Load()), addr) // 2.
+}
+
 // INFO:
 // 1. Reply false if term < currentTerm
 // 2. Reply false if log doesn't contain an entry
