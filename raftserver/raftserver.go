@@ -41,6 +41,7 @@ type RaftServer struct {
 	stateLock sync.Mutex
 
 	eTimeout *time.Ticker
+	servers  []*net.UDPAddr
 
 	// INFO: Persistent
 	currentTerm atomic.Int64
@@ -229,33 +230,46 @@ func main() {
 		log.Fatalf("Error reading %s: %v", id, err)
 	}
 
-	dataStr := string(data)
-	if !strings.Contains(dataStr, id) {
+	servers := make([]*net.UDPAddr, 0, 3)
+	serv := &RaftServer{
+		id:       id,
+		state:    Follower,
+		eTimeout: time.NewTicker(999999),
+	}
+	serv.resetTimeout()
+	valid_id := false
+
+	dataStr := strings.TrimRight(string(data), "\n")
+	for s := range strings.SplitSeq(dataStr, "\n") {
+		addr, err := net.ResolveUDPAddr("udp", s)
+		if err != nil {
+			log.Fatalf("error resolving %s: %v\n", s, err)
+		}
+		if s == id {
+			valid_id = true
+			serv.addr = addr
+		}
+		servers = append(servers, addr)
+	}
+	if !valid_id {
 		log.Fatalf("\"%s\" must be in %s\nContents of %s:\n%s\n", id, file, file, data)
 	}
 
-	sCount := strings.Count(dataStr, "\n")
-	addr, err := net.ResolveUDPAddr("udp", id)
-	if err != nil {
-		log.Fatalf("error resolving %s: %v\n", id, err)
-	}
+	serv.log = make([]miniraft.LogEntry, 0, 16)
+	serv.nextIndex = make([]atomic.Int64, len(servers))
+	serv.matchIndex = make([]atomic.Int64, len(servers))
+	serv.servers = servers
 
 	// filename = server-host-port.log
-	filename := "server-" + addr.IP.String() + "-" + strconv.Itoa(addr.Port) + ".log"
+	filename := "server-" + serv.addr.IP.String() + "-" + strconv.Itoa(serv.addr.Port) + ".log"
 	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		log.Fatalf("error reading %s file: %v", filename, err)
 	}
 	defer f.Close()
-	serv := &RaftServer{
-		id:         id,
-		addr:       addr,
-		logFile:    f,
-		state:      Follower,
-		log:        make([]miniraft.LogEntry, 16),
-		nextIndex:  make([]atomic.Int64, sCount),
-		matchIndex: make([]atomic.Int64, sCount),
-	}
+	serv.logFile = f
+
+	log.Printf("%+v\n", serv)
 
 	serv.serve()
 }
