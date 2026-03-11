@@ -128,6 +128,10 @@ func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest) minir
 	resp := miniraft.AppendEntriesResponse{
 		Term: int(serv.currentTerm.Load()),
 	}
+	if serv.state == Candidate && int(serv.currentTerm.Load()) <= req.Term {
+		serv.changeState(Follower)
+		serv.resetTimeout()
+	}
 	if len(req.LogEntries) == 0 {
 		resp.Success = true // Heartbeat
 		serv.resetTimeout()
