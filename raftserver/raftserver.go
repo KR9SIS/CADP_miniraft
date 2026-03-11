@@ -182,6 +182,10 @@ func (serv *RaftServer) handleRVRequest(req miniraft.RequestVoteRequest, addr *n
 	return resp
 }
 
+func (serv *RaftServer) handleRVResponse(res miniraft.RequestVoteResponse) {
+	// TODO: Implement
+}
+
 func (serv *RaftServer) logEntry(entry miniraft.LogEntry) (err error) {
 	term := strconv.Itoa(entry.Term)
 	idx := strconv.Itoa(entry.Index)
@@ -189,6 +193,39 @@ func (serv *RaftServer) logEntry(entry miniraft.LogEntry) (err error) {
 		return err
 	}
 	return nil
+}
+
+func (serv *RaftServer) handleMsg(bMsg []byte, addr *net.UDPAddr) {
+	log.Printf("Recv msg from: %v\nmsg: %v", addr, bMsg)
+
+	msg := &miniraft.RaftMessage{}
+	msgType, err := msg.UnmarshalRaftJSON(bMsg)
+	if err != nil {
+		log.Printf("error unmarshalling json msg.\nmsg: %v\nerror: %v\n", bMsg, err)
+	}
+
+	switch msgType {
+	case miniraft.AppendEntriesRequestMessage:
+		resp := serv.handleAERequest(msg.Message.(miniraft.AppendEntriesRequest))
+		if serv.state != Failed {
+			serv.sendMsg(resp, addr)
+		}
+
+	case miniraft.AppendEntriesResponseMessage:
+		serv.handleAEResponse(msg.Message.(miniraft.AppendEntriesResponse), addr)
+
+	case miniraft.RequestVoteRequestMessage:
+		resp := serv.handleRVRequest(msg.Message.(miniraft.RequestVoteRequest), addr)
+		if serv.state != Failed {
+			serv.sendMsg(resp, addr)
+		}
+
+	case miniraft.RequestVoteResponseMessage:
+		serv.handleRVResponse(msg.Message.(miniraft.RequestVoteResponse))
+
+	default:
+		log.Printf("error unmarshalling json msg, no such message type.\nmsg: %v\ntype: %v\n", bMsg, msgType)
+	}
 }
 
 func (serv *RaftServer) serve() (err error) {
@@ -204,7 +241,8 @@ func (serv *RaftServer) serve() (err error) {
 			log.Printf("error recvieving %d bytes from %s: %v\n", n, addr, err)
 			continue
 		}
-		log.Printf("recieved \"%s\" from %s", buffer[0:n], addr)
+		log.Printf("recieved \"%s\" from %s", buffer[0:n], addr) // WARN: Maybe remove
+		go serv.handleMsg(buffer[0:n], addr)
 	}
 }
 
