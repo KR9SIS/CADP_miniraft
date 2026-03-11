@@ -47,12 +47,12 @@ type RaftMessage struct {
 	Message any
 }
 
-func (message *RaftMessage) MarshalJson() (result []byte, err error) {
+func (message *RaftMessage) MarshalRaftJson() (result []byte, err error) {
 	result, err = json.Marshal(message.Message)
 	return
 }
 
-func (message *RaftMessage) UnmarshalJSON(b []byte) (msg MessageType, err error) {
+func (message *RaftMessage) UnmarshalRaftJSON(b []byte) (msg MessageType, err error) {
 	aer := &AppendEntriesRequest{}
 	err = json.Unmarshal(b, aer)
 	if err == nil && aer.LeaderId != "" {
