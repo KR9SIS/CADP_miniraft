@@ -45,6 +45,12 @@ type RaftServer struct {
 	// for each server, index of highest log entry known to be replicated on server
 }
 
+func (serv *RaftServer) getServerIdx(port int) int {
+	s := strconv.Itoa(port)
+	i := s[len(s)-1]
+	return int(i)
+}
+
 func (serv *RaftServer) sendMsg(message any, addr *net.UDPAddr) {
 	rMsg := miniraft.RaftMessage{
 		Message: message,
