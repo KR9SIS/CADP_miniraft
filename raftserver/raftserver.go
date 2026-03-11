@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -16,11 +17,28 @@ import (
 // 4 Bytes for header, 1296 for data
 const maxBufferSize = 1300
 
+type ServerState int
+
+const (
+	Failed ServerState = iota
+	Follower
+	Candidate
+	Leader
+)
+
+func (serv *RaftServer) changeState(state ServerState) {
+	serv.stateLock.Lock()
+	defer serv.stateLock.Unlock()
+	serv.state = state
+}
+
 type RaftServer struct {
 	id string
 	// identity:port string
-	addr    *net.UDPAddr
-	logFile *os.File
+	addr      *net.UDPAddr
+	logFile   *os.File
+	state     ServerState
+	stateLock sync.Mutex
 
 	eTimeout *time.Ticker
 
@@ -200,6 +218,7 @@ func main() {
 		id:         id,
 		addr:       addr,
 		logFile:    f,
+		state:      Follower,
 		log:        make([]miniraft.LogEntry, 16),
 		nextIndex:  make([]atomic.Int64, sCount),
 		matchIndex: make([]atomic.Int64, sCount),
