@@ -77,7 +77,7 @@ type RaftServer struct {
 }
 
 func (serv *RaftServer) startElection() {
-	serv.currentTerm.Store(serv.currentTerm.Add(1))
+	serv.currentTerm.Add(1)
 	serv.votes.Store(1)
 	serv.resetTimeout()
 	for _, s := range serv.servers {
@@ -136,7 +136,7 @@ func (serv *RaftServer) handleAEResponse(res miniraft.AppendEntriesResponse, add
 		serv.nextIndex[i].Store(serv.commitIndex.Load()) // 1.
 		return
 	}
-	serv.nextIndex[i].Store(int64(serv.nextIndex[i].Add(-1)))
+	serv.nextIndex[i].Add(-1)
 	if serv.nextIndex[i].Load() < 0 {
 		serv.nextIndex[i].Store(0)
 	}
