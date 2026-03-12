@@ -59,6 +59,8 @@ const (
 	Leader
 )
 
+var serverStateStr = [...]string{"Failed", "Follower", "Candidate", "Leader"}
+
 // INFO:
 // Safely changes the servers state
 // Spawns extra go routines to unlock stateLock
@@ -78,9 +80,11 @@ func (serv *RaftServer) changeState(state ServerState) {
 		serv.state = Leader
 		go serv.sendHeartBeats()
 	}
+	log.Printf("Changed %s state to %s\n", serv.id, serverStateStr[serv.state])
 }
 
 func (serv *RaftServer) startElection() {
+	log.Printf("%s starting election\n", serv.id)
 	serv.currentTerm.Add(1)
 	serv.votes.Store(1)
 	serv.resetTimeout()
@@ -97,6 +101,7 @@ func (serv *RaftServer) startElection() {
 }
 
 func (serv *RaftServer) sendHeartBeats() {
+	log.Printf("%s sending heartbeats\n", serv.id)
 	ticker := time.NewTicker(time.Millisecond * 75)
 	defer ticker.Stop()
 	for serv.state == Leader {
@@ -123,7 +128,7 @@ func (serv *RaftServer) sendMsg(message any, addr *net.UDPAddr) {
 	}
 	conn, err := net.DialUDP("udp", serv.addr, addr)
 	if err != nil {
-		log.Fatalf("Could not dial %v to UDP address\n", addr)
+		log.Printf("Could not dial %v to UDP address\n", addr)
 	}
 	defer conn.Close()
 	conn.Write(bMsg)
@@ -138,6 +143,7 @@ func (serv *RaftServer) sendAERequest(nextIndex int, addr *net.UDPAddr, entries 
 		LeaderCommit: nextIndex,
 		LogEntries:   entries,
 	}
+	log.Printf("%s sending AER to %s\n", serv.id, addr.String())
 	serv.sendMsg(aer, addr)
 }
 
@@ -148,12 +154,14 @@ func (serv *RaftServer) handleAEResponse(res miniraft.AppendEntriesResponse, add
 	// WARN: Maybe not completely done
 	i := serv.getServerIdx(addr.Port)
 	if res.Success {
+		log.Printf("AER to %s successful\n", addr.String())
 		serv.nextIndex[i].Store(serv.commitIndex.Load()) // 1.
 		return
 	}
 	if serv.nextIndex[i].Load() != 0 {
 		serv.nextIndex[i].Add(-1)
 	}
+	log.Printf("AER to %s failed, retrying\n", addr.String())
 	nextIndex := int(serv.nextIndex[i].Load())
 	serv.sendAERequest(nextIndex, addr, serv.log[nextIndex:]) // 2.
 }
@@ -168,7 +176,7 @@ func (serv *RaftServer) handleAEResponse(res miniraft.AppendEntriesResponse, add
 // 4. Append any new entries not already in the log
 // 5. If leaderCommit > commitIndex, set
 // commitIndex = min(leaderCommit, index of last new entry)
-func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest) miniraft.AppendEntriesResponse {
+func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest, addr *net.UDPAddr) miniraft.AppendEntriesResponse {
 	resp := miniraft.AppendEntriesResponse{
 		Term: int(serv.currentTerm.Load()),
 	}
@@ -176,17 +184,20 @@ func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest) minir
 		serv.changeState(Follower)
 	}
 	if len(req.LogEntries) == 0 {
+		log.Printf("Heartbeat recieved from %s\n", addr.String())
 		resp.Success = true // Heartbeat
 		serv.resetTimeout()
 		return resp
 	}
 	if req.Term < int(serv.currentTerm.Load()) {
+		log.Printf("%s term less than currentTerm, AER failed\n", addr.String())
 		resp.Success = false // 1.
 		return resp
 	}
 	if req.PrevLogIndex <= len(serv.log)-1 {
 		pLE := serv.log[req.PrevLogIndex]
 		if pLE.Term != req.PrevLogTerm {
+			log.Printf("%s prevLogIndex term != %s prevLogIndex term, AER failed\n", serv.id, addr.String())
 			resp.Success = false // 2.
 			return resp
 		}
@@ -197,6 +208,7 @@ func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest) minir
 		serv.log = append(serv.log, req.LogEntries...) // 4.
 	}
 	resp.Success = true
+	log.Printf("AER from %s successful", addr.String())
 	if int(serv.commitIndex.Load()) < req.LeaderCommit {
 		serv.commitIndex.Store(int64(min(req.LeaderCommit, len(serv.log)-1))) // 5.
 	}
@@ -212,6 +224,7 @@ func (serv *RaftServer) handleRVRequest(req miniraft.RequestVoteRequest, addr *n
 		Term: int(serv.currentTerm.Load()),
 	}
 	if req.Term < int(serv.currentTerm.Load()) {
+		log.Printf("Vote request from %s denied, term < currentTerm\n", addr.String())
 		resp.VoteGranted = false
 	} else if (serv.votedFor != "") && (serv.votedFor != addr.String()) {
 		resp.VoteGranted = false
@@ -254,7 +267,7 @@ func (serv *RaftServer) handleMsg(bMsg []byte, addr *net.UDPAddr) {
 
 	switch msgType {
 	case miniraft.AppendEntriesRequestMessage:
-		resp := serv.handleAERequest(msg.Message.(miniraft.AppendEntriesRequest))
+		resp := serv.handleAERequest(msg.Message.(miniraft.AppendEntriesRequest), addr)
 		if serv.state != Failed {
 			serv.sendMsg(resp, addr)
 		}
