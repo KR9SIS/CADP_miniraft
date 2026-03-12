@@ -209,7 +209,13 @@ func (serv *RaftServer) handleRVRequest(req miniraft.RequestVoteRequest, addr *n
 }
 
 func (serv *RaftServer) handleRVResponse(res miniraft.RequestVoteResponse) {
-	// TODO: Implement
+	if !res.VoteGranted {
+		return
+	}
+	serv.votes.Add(1)
+	if int(serv.votes.Load()) >= (len(serv.servers)/2)+1 {
+		serv.changeState(Leader)
+	}
 }
 
 func (serv *RaftServer) logEntry(entry miniraft.LogEntry) (err error) {
