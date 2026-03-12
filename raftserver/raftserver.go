@@ -96,6 +96,17 @@ func (serv *RaftServer) startElection() {
 	}
 }
 
+func (serv *RaftServer) sendHeartBeats() {
+	ticker := time.NewTicker(time.Millisecond * 75)
+	defer ticker.Stop()
+	for serv.state == Leader {
+		<-ticker.C
+		for i, s := range serv.servers {
+			serv.sendAERequest(int(serv.nextIndex[i].Load()), s, []miniraft.LogEntry{})
+		}
+	}
+}
+
 func (serv *RaftServer) getServerIdx(port int) int {
 	s := strconv.Itoa(port)
 	i := s[len(s)-1]
@@ -311,6 +322,7 @@ func main() {
 		state:    Follower,
 		eTimeout: time.NewTicker(999999),
 	}
+	defer serv.eTimeout.Stop()
 	serv.resetTimeout()
 	valid_id := false
 
@@ -323,8 +335,9 @@ func main() {
 		if s == id {
 			valid_id = true
 			serv.addr = addr
+		} else {
+			servers = append(servers, addr)
 		}
-		servers = append(servers, addr)
 	}
 	if !valid_id {
 		log.Fatalf("\"%s\" must be in %s\nContents of %s:\n%s\n", id, file, file, data)
