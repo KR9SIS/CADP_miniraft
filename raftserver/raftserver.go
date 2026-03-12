@@ -29,7 +29,18 @@ const (
 func (serv *RaftServer) changeState(state ServerState) {
 	serv.stateLock.Lock()
 	defer serv.stateLock.Unlock()
-	serv.state = state
+	switch state {
+	case Failed:
+		serv.state = Failed
+	case Follower:
+		serv.state = Follower
+		serv.resetTimeout()
+	case Candidate:
+		serv.state = Candidate
+		serv.startElection()
+	case Leader:
+		serv.state = Leader
+	}
 }
 
 type RaftServer struct {
@@ -41,6 +52,7 @@ type RaftServer struct {
 	stateLock sync.Mutex
 
 	eTimeout *time.Ticker
+	votes    atomic.Int64
 	servers  []*net.UDPAddr
 
 	// INFO: Persistent
@@ -62,6 +74,22 @@ type RaftServer struct {
 	// for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
 	matchIndex []atomic.Int64
 	// for each server, index of highest log entry known to be replicated on server
+}
+
+func (serv *RaftServer) startElection() {
+	serv.currentTerm.Store(serv.currentTerm.Add(1))
+	serv.votes.Store(1)
+	serv.resetTimeout()
+	for _, s := range serv.servers {
+		lLE := serv.log[int(serv.lastApplied.Load())]
+		rVReq := &miniraft.RequestVoteRequest{
+			Term:         int(serv.currentTerm.Load()),
+			LastLogIndex: lLE.Index,
+			LastLogTerm:  lLE.Term,
+		}
+
+		serv.sendMsg(rVReq, s)
+	}
 }
 
 func (serv *RaftServer) getServerIdx(port int) int {
@@ -131,7 +159,6 @@ func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest) minir
 	}
 	if serv.state == Candidate && int(serv.currentTerm.Load()) <= req.Term {
 		serv.changeState(Follower)
-		serv.resetTimeout()
 	}
 	if len(req.LogEntries) == 0 {
 		resp.Success = true // Heartbeat
