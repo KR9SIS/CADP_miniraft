@@ -114,14 +114,14 @@ func (serv *RaftServer) sendMsg(message any, addr *net.UDPAddr) {
 	conn.Write(bMsg)
 }
 
-func (serv *RaftServer) sendAERequest(nextIndex int, addr *net.UDPAddr) {
+func (serv *RaftServer) sendAERequest(nextIndex int, addr *net.UDPAddr, entries []miniraft.LogEntry) {
 	aer := &miniraft.AppendEntriesRequest{
 		Term:         int(serv.currentTerm.Load()),
 		PrevLogIndex: nextIndex - 1,
 		PrevLogTerm:  serv.log[nextIndex-1].Term,
 		LeaderId:     serv.id,
 		LeaderCommit: nextIndex,
-		LogEntries:   serv.log[nextIndex:],
+		LogEntries:   entries,
 	}
 	serv.sendMsg(aer, addr)
 }
@@ -139,7 +139,8 @@ func (serv *RaftServer) handleAEResponse(res miniraft.AppendEntriesResponse, add
 	if serv.nextIndex[i].Load() != 0 {
 		serv.nextIndex[i].Add(-1)
 	}
-	serv.sendAERequest(int(serv.nextIndex[i].Load()), addr) // 2.
+	nextIndex := int(serv.nextIndex[i].Load())
+	serv.sendAERequest(nextIndex, addr, serv.log[nextIndex:]) // 2.
 }
 
 // INFO:
