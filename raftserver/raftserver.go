@@ -59,6 +59,9 @@ const (
 	Leader
 )
 
+// INFO:
+// Safely changes the servers state
+// Spawns extra go routines to unlock stateLock
 func (serv *RaftServer) changeState(state ServerState) {
 	serv.stateLock.Lock()
 	defer serv.stateLock.Unlock()
@@ -70,9 +73,10 @@ func (serv *RaftServer) changeState(state ServerState) {
 		serv.resetTimeout()
 	case Candidate:
 		serv.state = Candidate
-		serv.startElection()
+		go serv.startElection()
 	case Leader:
 		serv.state = Leader
+		go serv.sendHeartBeats()
 	}
 }
 
