@@ -17,6 +17,14 @@ import (
 // 4 Bytes for header, 1296 for data
 const maxBufferSize = 1300
 
+const (
+	// 75 ms for hearbeat
+	heartbeatTimeout = 75
+	// Allow 3 heartbeats before min election timeout
+	minElectionTimeout = heartbeatTimeout * 3
+	maxElectionTimeout = minElectionTimeout * 2
+)
+
 type RaftServer struct {
 	id string
 	// identity:port string
@@ -308,12 +316,8 @@ func (serv *RaftServer) serve() (err error) {
 }
 
 func (serv *RaftServer) resetTimeout() {
-	// generate timeout in the range 150 to 300
-	timeout := strconv.Itoa(rand.Intn(300-150)+150) + "ms"
-	d, err := time.ParseDuration(timeout)
-	if err != nil {
-		serv.resetTimeout() // Try again
-	}
+	timeout := rand.Intn(maxElectionTimeout-minElectionTimeout) + minElectionTimeout
+	d := time.Duration(timeout) * time.Millisecond
 	serv.eTimeout.Reset(d)
 }
 
