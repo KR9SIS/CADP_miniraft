@@ -1,0 +1,33 @@
+#!/bin/env bash
+# Modified from version by Konráð Elí <konrad21@ru.is>
+#
+# run script and press C-b w to get window overview
+# C-b d to detatch
+server="./raftserver/raftserver.go"
+client="./raftclient/raftclient.go"
+messenger=./messenger.go
+tmuxsession=miniraft
+
+if [[ -z "$1" ]]; then
+  echo "Missing argument:"
+  echo "$1 <server ID file>"
+  exit 1
+fi
+
+if tmux has-session -t "$tmuxsession" 2>/dev/null; then
+  tmux kill-session -t $tmuxsession
+fi
+
+tmux new-session -d -s $tmuxsession -n "registry" "go run $registry $registryPort"
+tmux set-option -t $tmuxsession remain-on-exit on
+tmux set-option -t $tmuxsession mouse on
+
+echo "Starting Messengers"
+for ((i = 0; i < "$1"; i++)); do
+  tmux new-window -t $tmuxsession -n "messenger$i" -c "$PWD" "go run $messenger $registryHost:$registryPort"
+done
+
+tmux attach -t "$tmuxsession:1"
+tmux kill-session -t $tmuxsession
+
+# Create test from Figure 8.5 in chapter 8 of Distributed Systems 4th edition

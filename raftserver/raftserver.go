@@ -164,6 +164,7 @@ func (serv *RaftServer) handleAEResponse(res miniraft.AppendEntriesResponse, add
 	if res.Success {
 		log.Printf("AER to %s successful\n", addr.String())
 		serv.nextIndex[i].Store(serv.commitIndex.Load()) // 1.
+		// TODO: Update serv.matchIndex array
 		return
 	}
 	if serv.nextIndex[i].Load() != 0 {
@@ -248,6 +249,7 @@ func (serv *RaftServer) handleRVRequest(req miniraft.RequestVoteRequest, addr *n
 	return resp
 }
 
+// TODO: change to follower if response term is higher than own.
 func (serv *RaftServer) handleRVResponse(res miniraft.RequestVoteResponse) {
 	if !res.VoteGranted {
 		return
