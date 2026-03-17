@@ -188,7 +188,7 @@ func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest, addr 
 	resp := miniraft.AppendEntriesResponse{
 		Term: int(serv.currentTerm.Load()),
 	}
-	if serv.state == Candidate && int(serv.currentTerm.Load()) <= req.Term {
+	if serv.state != Follower && int(serv.currentTerm.Load()) <= req.Term {
 		serv.changeState(Follower)
 	}
 	if len(req.LogEntries) == 0 {
@@ -230,6 +230,9 @@ func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest, addr 
 func (serv *RaftServer) handleRVRequest(req miniraft.RequestVoteRequest, addr *net.UDPAddr) miniraft.RequestVoteResponse {
 	resp := miniraft.RequestVoteResponse{
 		Term: int(serv.currentTerm.Load()),
+	}
+	if serv.state != Follower && int(serv.currentTerm.Load()) < req.Term {
+		serv.changeState(Follower)
 	}
 	if req.Term < int(serv.currentTerm.Load()) {
 		log.Printf("Vote request from %s denied, term < currentTerm\n", addr.String())
