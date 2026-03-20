@@ -231,15 +231,7 @@ func (serv *RaftServer) advanceCommitIndex() {
 		// we commit a newer entry (the inner loop below writes everything up to n).
 		entryIsFromCurrentTerm := serv.log[n].Term == int(serv.currentTerm.Load())
 		if count >= majority && entryIsFromCurrentTerm {
-			// Write everything from the old commitIndex up to n to the log file
-			for idx := int(serv.commitIndex.Load()) + 1; idx <= n; idx++ {
-				err := serv.logEntry(serv.log[idx])
-				if err != nil {
-					log.Printf("advanceCommitIndex: error writing entry %d to log file: %v\n", idx, err)
-				}
-			}
-			serv.commitIndex.Store(int64(n))
-			log.Printf("advanceCommitIndex: committed up to index %d\n", n)
+			serv.commitUpTo(n)
 		} else {
 			// Can't commit n, so no point checking higher indexes either
 			break
@@ -261,37 +253,53 @@ func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest, addr 
 	resp := miniraft.AppendEntriesResponse{
 		Term: int(serv.currentTerm.Load()),
 	}
-	if serv.state != Follower && int(serv.currentTerm.Load()) <= req.Term {
+
+	// If we are a candidate or leader and the incoming term is higher, step down.
+	// We don't touch Failed servers here — they stay Failed until a resume command.
+	if (serv.state == Candidate || serv.state == Leader) && req.Term > int(serv.currentTerm.Load()) {
+		serv.currentTerm.Store(int64(req.Term))
 		serv.changeState(Follower)
 	}
+
+	// 1. Reject if the request is from a stale leader
+	if req.Term < int(serv.currentTerm.Load()) {
+		log.Printf("handleAERequest: rejected from %s, their term %d is less than ours %d\n", addr.String(), req.Term, int(serv.currentTerm.Load()))
+		resp.Success = false
+		return resp
+	}
+
+	// Heartbeat, no entries to append, just reset our election timeout
 	if len(req.LogEntries) == 0 {
-		log.Printf("Heartbeat recieved from %s\n", addr.String())
-		resp.Success = true // Heartbeat
+		log.Printf("Heartbeat received from %s\n", addr.String())
+		resp.Success = true
 		serv.resetTimeout()
 		return resp
 	}
-	if req.Term < int(serv.currentTerm.Load()) {
-		log.Printf("%s term less than currentTerm, AER failed\n", addr.String())
-		resp.Success = false // 1.
+
+	// 2. Reject if our log doesn't have the entry the leader expects just before the new ones.
+	// PrevLogIndex is the index of the entry right before what the leader is sending.
+	// If we don't have that entry, or its term doesn't match, our logs have diverged.
+	if req.PrevLogIndex > len(serv.log)-1 {
+		log.Printf("handleAERequest: rejected from %s, missing entry at PrevLogIndex %d\n", addr.String(), req.PrevLogIndex)
+		resp.Success = false
 		return resp
 	}
-	if req.PrevLogIndex <= len(serv.log)-1 {
-		pLE := serv.log[req.PrevLogIndex]
-		if pLE.Term != req.PrevLogTerm {
-			log.Printf("%s prevLogIndex term != %s prevLogIndex term, AER failed\n", serv.id, addr.String())
-			resp.Success = false // 2.
-			return resp
-		}
+	if serv.log[req.PrevLogIndex].Term != req.PrevLogTerm {
+		log.Printf("handleAERequest: rejected from %s, term mismatch at PrevLogIndex %d\n", addr.String(), req.PrevLogIndex)
+		resp.Success = false
+		return resp
 	}
-	if req.LeaderCommit <= len(serv.log)-1 {
-		serv.log = append(serv.log[req.LeaderCommit:], req.LogEntries...) // 3. & 4.
-	} else {
-		serv.log = append(serv.log, req.LogEntries...) // 4.
-	}
+
+	// 3. & 4. Truncate any conflicting entries and append the new ones.
+	// We keep everything up to and including PrevLogIndex, then replace the rest with what the leader sent.
+	serv.log = append(serv.log[:req.PrevLogIndex+1], req.LogEntries...)
 	resp.Success = true
-	log.Printf("AER from %s successful", addr.String())
-	if int(serv.commitIndex.Load()) < req.LeaderCommit {
-		serv.commitIndex.Store(int64(min(req.LeaderCommit, len(serv.log)-1))) // 5.
+	log.Printf("handleAERequest: appended %d entries from %s\n", len(req.LogEntries), addr.String())
+
+	// 5. Advance commitIndex to match the leader's, then write newly committed entries to the log file
+	if req.LeaderCommit > int(serv.commitIndex.Load()) {
+		newCommit := min(req.LeaderCommit, len(serv.log)-1)
+		serv.commitUpTo(newCommit)
 	}
 	return resp
 }
@@ -300,29 +308,64 @@ func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest, addr 
 // 1. Reply false if term < currentTerm
 // 2. If (votedFor is null or candidateId) and
 // Candidate's log is at least as up-to-date as reciver's log, grant vote
-func (serv *RaftServer) handleRVRequest(req miniraft.RequestVoteRequest, addr *net.UDPAddr) miniraft.RequestVoteResponse {
+func (serv *RaftServer) handleRVRequest(req miniraft.RequestVoteRequest) miniraft.RequestVoteResponse {
 	resp := miniraft.RequestVoteResponse{
 		Term: int(serv.currentTerm.Load()),
 	}
-	if serv.state != Follower && int(serv.currentTerm.Load()) < req.Term {
+
+	// If we are a candidate or leader and the incoming term is higher, step down.
+	// Failed servers stay Failed until a resume command.
+	if (serv.state == Candidate || serv.state == Leader) && req.Term > int(serv.currentTerm.Load()) {
+		serv.currentTerm.Store(int64(req.Term))
 		serv.changeState(Follower)
 	}
+
+	// 1. Deny if the candidate's term is less than ours
 	if req.Term < int(serv.currentTerm.Load()) {
-		log.Printf("Vote request from %s denied, term < currentTerm\n", addr.String())
+		log.Printf("handleRVRequest: denied %s, their term %d is less than ours %d\n", req.CandidateName, req.Term, int(serv.currentTerm.Load()))
 		resp.VoteGranted = false
-	} else if (serv.votedFor != "") && (serv.votedFor != addr.String()) {
-		resp.VoteGranted = false
-	} else if req.LastLogIndex < int(serv.lastApplied.Load()) {
-		resp.VoteGranted = false
-	} else {
-		serv.resetTimeout()
-		resp.VoteGranted = true
+		return resp
 	}
+
+	// Deny if we already voted for someone else this term
+	if serv.votedFor != "" && serv.votedFor != req.CandidateName {
+		log.Printf("handleRVRequest: denied %s, already voted for %s\n", req.CandidateName, serv.votedFor)
+		resp.VoteGranted = false
+		return resp
+	}
+
+	// 2. Check if the candidate's log is at least as up-to-date as ours.
+	// First compare the last log term — higher term wins.
+	// If terms are equal, the longer log wins.
+	ourLastIndex := len(serv.log) - 1
+	ourLastTerm := serv.log[ourLastIndex].Term
+	if req.LastLogTerm < ourLastTerm {
+		log.Printf("handleRVRequest: denied %s, their last log term %d is less than ours %d\n", req.CandidateName, req.LastLogTerm, ourLastTerm)
+		resp.VoteGranted = false
+		return resp
+	}
+	if req.LastLogTerm == ourLastTerm && req.LastLogIndex < ourLastIndex {
+		log.Printf("handleRVRequest: denied %s, their log is shorter than ours\n", req.CandidateName)
+		resp.VoteGranted = false
+		return resp
+	}
+
+	// Grant the vote and record it so we don't vote for someone else this term
+	serv.votedFor = req.CandidateName
+	serv.resetTimeout()
+	resp.VoteGranted = true
+	log.Printf("handleRVRequest: granted vote to %s\n", req.CandidateName)
 	return resp
 }
 
 // TODO: change to follower if response term is higher than own.
 func (serv *RaftServer) handleRVResponse(res miniraft.RequestVoteResponse) {
+	if res.Term > int(serv.currentTerm.Load()) {
+		log.Printf("handleRVResponse: response has higher term %d, stepping down\n", res.Term)
+		serv.currentTerm.Store(int64(res.Term))
+		serv.changeState(Follower)
+		return
+	}
 	if !res.VoteGranted {
 		return
 	}
@@ -339,6 +382,19 @@ func (serv *RaftServer) logEntry(entry miniraft.LogEntry) (err error) {
 		return err
 	}
 	return nil
+}
+
+// commitUpTo writes all entries from commitIndex+1 up to n to the log file and advances commitIndex.
+// Used by both the leader (advanceCommitIndex) and followers (handleAERequest).
+func (serv *RaftServer) commitUpTo(n int) {
+	for idx := int(serv.commitIndex.Load()) + 1; idx <= n; idx++ {
+		err := serv.logEntry(serv.log[idx])
+		if err != nil {
+			log.Printf("commitUpTo: error writing entry %d to log file: %v\n", idx, err)
+		}
+	}
+	serv.commitIndex.Store(int64(n))
+	log.Printf("commitUpTo: committed up to index %d\n", n)
 }
 
 func (serv *RaftServer) handleMsg(bMsg []byte, addr *net.UDPAddr) {
@@ -361,7 +417,7 @@ func (serv *RaftServer) handleMsg(bMsg []byte, addr *net.UDPAddr) {
 		serv.handleAEResponse(msg.Message.(miniraft.AppendEntriesResponse), addr)
 
 	case miniraft.RequestVoteRequestMessage:
-		resp := serv.handleRVRequest(msg.Message.(miniraft.RequestVoteRequest), addr)
+		resp := serv.handleRVRequest(msg.Message.(miniraft.RequestVoteRequest))
 		if serv.state != Failed {
 			serv.sendMsg(resp, addr)
 		}
