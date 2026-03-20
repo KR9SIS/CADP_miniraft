@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/KR9SIS/CADP_miniraft/msg_format"
+	miniraft "github.com/KR9SIS/CADP_miniraft/msg_format"
 )
 
 // 4 Bytes for header, 1296 for data
@@ -35,6 +35,7 @@ type RaftServer struct {
 
 	eTimeout *time.Ticker
 	votes    atomic.Int64
+	//list of other servers in the cluster, used to send messages to other servers.
 	servers  []*net.UDPAddr
 
 	// INFO: Persistent
@@ -102,6 +103,7 @@ func (serv *RaftServer) startElection() {
 			Term:         int(serv.currentTerm.Load()),
 			LastLogIndex: lLE.Index,
 			LastLogTerm:  lLE.Term,
+			CandidateName: serv.id,
 		}
 
 		serv.sendMsg(rVReq, s)
@@ -120,10 +122,14 @@ func (serv *RaftServer) sendHeartBeats() {
 	}
 }
 
-func (serv *RaftServer) getServerIdx(port int) int {
-	s := strconv.Itoa(port)
-	i := s[len(s)-1]
-	return int(i)
+// Returns the index of the server with the given "host:port" ID in the servers slice, or -1 if not found.
+func (serv *RaftServer) getServerIdx(serverID string) int {
+	for i, s := range serv.servers {
+		if s.String() == serverID {
+			return i
+		}
+	}
+	return -1
 }
 
 func (serv *RaftServer) sendMsg(message any, addr *net.UDPAddr) {
@@ -142,6 +148,8 @@ func (serv *RaftServer) sendMsg(message any, addr *net.UDPAddr) {
 	conn.Write(bMsg)
 }
 
+// ath: hvað ef nextIndex er 0? Gæti það ekki verið.
+// ath: hvað er leaderCommit? á það örugglega að vera nextIndex.
 func (serv *RaftServer) sendAERequest(nextIndex int, addr *net.UDPAddr, entries []miniraft.LogEntry) {
 	aer := &miniraft.AppendEntriesRequest{
 		Term:         int(serv.currentTerm.Load()),
@@ -160,7 +168,11 @@ func (serv *RaftServer) sendAERequest(nextIndex int, addr *net.UDPAddr, entries 
 // 2. If not, decrease followers nextIndex and try again
 func (serv *RaftServer) handleAEResponse(res miniraft.AppendEntriesResponse, addr *net.UDPAddr) {
 	// WARN: Maybe not completely done
-	i := serv.getServerIdx(addr.Port)
+	i := serv.getServerIdx(addr.String())
+	if i == -1 {
+		log.Printf("handleAEResponse: unknown server %s\n", addr.String())
+		return
+	}
 	if res.Success {
 		log.Printf("AER to %s successful\n", addr.String())
 		serv.nextIndex[i].Store(serv.commitIndex.Load()) // 1.
