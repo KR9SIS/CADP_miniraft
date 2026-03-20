@@ -29,6 +29,7 @@ type RaftServer struct {
 	id string
 	// identity:port string
 	addr      *net.UDPAddr
+	conn      *net.UDPConn
 	logFile   *os.File
 	state     ServerState
 	stateLock sync.Mutex
@@ -57,6 +58,8 @@ type RaftServer struct {
 	// for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
 	matchIndex []atomic.Int64
 	// for each server, index of highest log entry known to be replicated on server
+	inflightIndex []atomic.Int64
+	// for each server, the last log index we sent in the most recent AppendEntries request
 }
 
 type ServerState int
@@ -139,52 +142,109 @@ func (serv *RaftServer) sendMsg(message any, addr *net.UDPAddr) {
 	bMsg, err := rMsg.MarshalRaftJson()
 	if err != nil {
 		log.Printf("error marshalling response to %s\nresponse: %v\nerror: %v", addr.String(), message, err)
+		return
 	}
-	conn, err := net.DialUDP("udp", serv.addr, addr)
-	if err != nil {
-		log.Printf("Could not dial %v to UDP address\n", addr)
+	if _, err := serv.conn.WriteToUDP(bMsg, addr); err != nil {
+		log.Printf("error sending to %s: %v\n", addr.String(), err)
 	}
-	defer conn.Close()
-	conn.Write(bMsg)
 }
 
-// ath: hvað ef nextIndex er 0? Gæti það ekki verið.
-// ath: hvað er leaderCommit? á það örugglega að vera nextIndex.
 func (serv *RaftServer) sendAERequest(nextIndex int, addr *net.UDPAddr, entries []miniraft.LogEntry) {
+	// Record the last index we are sending so handleAEResponse knows what the follower confirmed
+	i := serv.getServerIdx(addr.String())
+	if i != -1 {
+		serv.inflightIndex[i].Store(int64(nextIndex + len(entries) - 1))
+	}
 	aer := &miniraft.AppendEntriesRequest{
 		Term:         int(serv.currentTerm.Load()),
 		PrevLogIndex: nextIndex - 1,
 		PrevLogTerm:  serv.log[nextIndex-1].Term,
 		LeaderId:     serv.id,
-		LeaderCommit: nextIndex,
+		LeaderCommit: int(serv.commitIndex.Load()),
 		LogEntries:   entries,
 	}
 	log.Printf("%s sending AER to %s\n", serv.id, addr.String())
 	serv.sendMsg(aer, addr)
 }
 
-// INFO:
-// 1. If request was successful, update followers nextIndex
-// 2. If not, decrease followers nextIndex and try again
+// handleAEResponse is called when we receive a response to an AppendEntries request we sent.
+// On success: update the follower's nextIndex and matchIndex, then check if we can commit new entries.
+// On failure: back up nextIndex by one and retry with a longer suffix of the log.
 func (serv *RaftServer) handleAEResponse(res miniraft.AppendEntriesResponse, addr *net.UDPAddr) {
-	// WARN: Maybe not completely done
 	i := serv.getServerIdx(addr.String())
 	if i == -1 {
 		log.Printf("handleAEResponse: unknown server %s\n", addr.String())
 		return
 	}
-	if res.Success {
-		log.Printf("AER to %s successful\n", addr.String())
-		serv.nextIndex[i].Store(serv.commitIndex.Load()) // 1.
-		// TODO: Update serv.matchIndex array
+
+	// If the response has a higher term, we are a stale leader and must step down
+	if res.Term > int(serv.currentTerm.Load()) {
+		log.Printf("handleAEResponse: response from %s has higher term %d, stepping down\n", addr.String(), res.Term)
+		serv.currentTerm.Store(int64(res.Term))
+		serv.changeState(Follower)
 		return
 	}
-	if serv.nextIndex[i].Load() != 0 {
+
+	if res.Success {
+		log.Printf("AEResponse from %s: success\n", addr.String())
+
+		// Update nextIndex and matchIndex based on what we actually sent (inflightIndex)
+		// We can't just use len(log) here because new entries might have been added since we sent the request
+		lastSent := int(serv.inflightIndex[i].Load())
+		serv.nextIndex[i].Store(int64(lastSent + 1))
+		serv.matchIndex[i].Store(int64(lastSent))
+
+		// Check if we can now commit more entries
+		serv.advanceCommitIndex()
+		return
+	}
+
+	// The follower rejected our entries, meaning its log doesn't match ours at nextIndex-1.
+	// Back up nextIndex by one and retry with a longer suffix so we find where the logs are the same.
+	log.Printf("AEResponse from %s: failed, backing up and retrying\n", addr.String())
+	if serv.nextIndex[i].Load() > 1 {
 		serv.nextIndex[i].Add(-1)
 	}
-	log.Printf("AER to %s failed, retrying\n", addr.String())
 	nextIndex := int(serv.nextIndex[i].Load())
-	serv.sendAERequest(nextIndex, addr, serv.log[nextIndex:]) // 2.
+	serv.sendAERequest(nextIndex, addr, serv.log[nextIndex:])
+}
+
+// advanceCommitIndex checks if any new log entries can be committed.
+// advanceCommitIndex checks if any new log entries can be committed.
+// An entry is committed when a majority of servers have it in their log.
+func (serv *RaftServer) advanceCommitIndex() {
+	total := len(serv.servers) + 1 // all servers including the leader
+	majority := total/2 + 1
+
+	// Try to commit each entry starting from the one after the current commitIndex
+	for n := int(serv.commitIndex.Load()) + 1; n < len(serv.log); n++ {
+		// The leader always has its own entries so we start the count at 1
+		count := 1
+		for j := range serv.servers {
+			if int(serv.matchIndex[j].Load()) >= n {
+				count++
+			}
+		}
+
+		// We can only commit entries from our own term (Raft safety rule).
+		// Old entries from previous terms get committed as a side effect when
+		// we commit a newer entry (the inner loop below writes everything up to n).
+		entryIsFromCurrentTerm := serv.log[n].Term == int(serv.currentTerm.Load())
+		if count >= majority && entryIsFromCurrentTerm {
+			// Write everything from the old commitIndex up to n to the log file
+			for idx := int(serv.commitIndex.Load()) + 1; idx <= n; idx++ {
+				err := serv.logEntry(serv.log[idx])
+				if err != nil {
+					log.Printf("advanceCommitIndex: error writing entry %d to log file: %v\n", idx, err)
+				}
+			}
+			serv.commitIndex.Store(int64(n))
+			log.Printf("advanceCommitIndex: committed up to index %d\n", n)
+		} else {
+			// Can't commit n, so no point checking higher indexes either
+			break
+		}
+	}
 }
 
 // INFO:
@@ -319,6 +379,8 @@ func (serv *RaftServer) serve() (err error) {
 	if err != nil {
 		log.Fatalf("failed to listen on port %d: %v\n", serv.addr.Port, err)
 	}
+	defer serverConn.Close()
+	serv.conn = serverConn
 	buffer := make([]byte, maxBufferSize)
 	log.Printf("%s listening", serv.id)
 	for {
@@ -377,9 +439,11 @@ func main() {
 		log.Fatalf("\"%s\" must be in %s\nContents of %s:\n%s\n", id, file, file, data)
 	}
 
-	serv.log = make([]miniraft.LogEntry, 0, 16)
+	// The log starts with a dummy entry at index 0 so we can always safely access log[nextIndex-1]
+	serv.log = make([]miniraft.LogEntry, 1, 16)
 	serv.nextIndex = make([]atomic.Int64, len(servers))
 	serv.matchIndex = make([]atomic.Int64, len(servers))
+	serv.inflightIndex = make([]atomic.Int64, len(servers))
 	serv.servers = servers
 
 	// filename = server-host-port.log
