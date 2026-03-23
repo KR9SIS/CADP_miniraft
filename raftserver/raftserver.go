@@ -36,8 +36,8 @@ type RaftServer struct {
 
 	eTimeout *time.Ticker
 	votes    atomic.Int64
-	//list of other servers in the cluster, used to send messages to other servers.
-	servers  []*net.UDPAddr
+	// list of other servers in the cluster, used to send messages to other servers.
+	servers []*net.UDPAddr
 
 	// INFO: Persistent
 	currentTerm atomic.Int64
@@ -87,7 +87,7 @@ func (serv *RaftServer) changeState(state ServerState) {
 		serv.resetTimeout()
 	case Candidate:
 		serv.state = Candidate
-		go serv.startElection()
+		serv.startElection()
 	case Leader:
 		serv.state = Leader
 		go serv.sendHeartBeats()
@@ -103,9 +103,9 @@ func (serv *RaftServer) startElection() {
 	for _, s := range serv.servers {
 		lLE := serv.log[int(serv.lastApplied.Load())]
 		rVReq := &miniraft.RequestVoteRequest{
-			Term:         int(serv.currentTerm.Load()),
-			LastLogIndex: lLE.Index,
-			LastLogTerm:  lLE.Term,
+			Term:          int(serv.currentTerm.Load()),
+			LastLogIndex:  lLE.Index,
+			LastLogTerm:   lLE.Term,
 			CandidateName: serv.id,
 		}
 
