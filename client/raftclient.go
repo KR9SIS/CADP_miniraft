@@ -2,17 +2,13 @@ package main
 
 import (
 	"bufio"
-	"bytes"
+	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"os"
 	"regexp"
 )
-
-func parseCmd(cmd []byte, dst *net.UDPAddr) {
-	log.Println(string(cmd))
-	log.Printf("Dest: %s", dst)
-}
 
 func main() {
 	if len(os.Args) != 2 {
@@ -30,23 +26,40 @@ func main() {
 		log.Fatalf("Could not Resolve Address: %v\n%v\n", os.Args[1], err)
 	}
 
-	EXIT := []byte("exit")
+	msg := make(map[string]string)
 
 	scanner := bufio.NewScanner(os.Stdin)
+	fmt.Printf("Command: ")
 	for scanner.Scan() {
-		cmd := scanner.Bytes()
-		if bytes.Equal(cmd, EXIT) {
+		cmd := scanner.Text()
+		if cmd == "exit" {
 			break
 		}
-		m, err := regexp.Match("[^\\w\\-]", cmd)
+
+		m, err := regexp.Match("[^\\w\\-]", []byte(cmd))
 		if err != nil {
 			log.Printf("Error matching cmd: %s, err: %v", cmd, err)
 		}
-		if m {
+		if m || err != nil {
 			log.Printf("Invalid cmd: %s\ncmd must only contain upper-case letters, lower-case letters, digits, dashes and underscores.\n", cmd)
-		} else {
-			parseCmd(cmd, dst)
+			fmt.Printf("Command: ")
+			continue
 		}
+
+		msg["Command"] = cmd
+		bMsg, err := json.Marshal(msg)
+		if err != nil {
+			log.Printf("Failed to marshal cmd: %s\nerr: %v", cmd, err)
+			fmt.Printf("Command: ")
+			continue
+		}
+
+		_, err = conn.WriteTo(bMsg, dst)
+		if err != nil {
+			log.Printf("Failed to send '%s' to %v", bMsg, dst)
+		}
+
+		fmt.Printf("Command: ")
 	}
 
 	if err := scanner.Err(); err != nil {
