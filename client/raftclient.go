@@ -2,12 +2,13 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"regexp"
+
+	miniraft "github.com/KR9SIS/CADP_miniraft/msg_format"
 )
 
 func main() {
@@ -25,8 +26,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Could not Resolve Address: %v\n%v\n", os.Args[1], err)
 	}
-
-	msg := make(map[string]string)
+	log.Printf("Destination: %s", dst.String())
 
 	scanner := bufio.NewScanner(os.Stdin)
 	fmt.Printf("Command: ")
@@ -46,17 +46,19 @@ func main() {
 			continue
 		}
 
-		msg["Command"] = cmd
-		bMsg, err := json.Marshal(msg)
-		if err != nil {
-			log.Printf("Failed to marshal cmd: %s\nerr: %v", cmd, err)
-			fmt.Printf("Command: ")
-			continue
+		cCmd := &miniraft.ClientCommand{
+			Command: cmd,
 		}
-
-		_, err = conn.WriteTo(bMsg, dst)
+		rMsg := miniraft.RaftMessage{
+			Message: cCmd,
+		}
+		bMsg, err := rMsg.MarshalRaftJson()
 		if err != nil {
-			log.Printf("Failed to send '%s' to %v", bMsg, dst)
+			log.Printf("error marshalling response to %s\nresponse: %v\nerror: %v", dst.String(), cCmd, err)
+			return
+		}
+		if _, err := conn.WriteTo(bMsg, dst); err != nil {
+			log.Printf("error sending to %s: %v\n", dst.String(), err)
 		}
 
 		fmt.Printf("Command: ")
