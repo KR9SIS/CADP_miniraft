@@ -1,0 +1,31 @@
+#!/bin/env bash
+
+# run script and press C-b w to get window overview
+# C-b d to detatch
+CLIENT="./raftclient/raftclient.go"
+SERVER="./raftserver/raftserver.go"
+TMUXSESSION=RAFT
+
+if [[ -z "$1" ]]; then
+  echo "Missing argument:"
+  echo "$1 <server ID file>"
+  exit 1
+fi
+
+if tmux has-session -t "$TMUXSESSION" 2>/dev/null; then
+  tmux kill-session -t $TMUXSESSION
+fi
+
+tmux new-session -d -s $TMUXSESSION -n "client" "go run $CLIENT"
+tmux set-option -t $TMUXSESSION remain-on-exit on
+tmux set-option -t $TMUXSESSION mouse on
+
+echo "Starting Servers"
+i=0
+while IFS= read -r line; do
+  tmux new-window -t $TMUXSESSION -n "server$i" -c "$PWD" "go run $SERVER $line $1"
+  i=$((i + 1))
+done <"$1"
+
+tmux attach -t "$TMUXSESSION:1"
+tmux kill-session -t $TMUXSESSION
