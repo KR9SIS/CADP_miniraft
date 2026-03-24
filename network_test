@@ -16,7 +16,8 @@ if tmux has-session -t "$TMUXSESSION" 2>/dev/null; then
   tmux kill-session -t $TMUXSESSION
 fi
 
-tmux new-session -d -s $TMUXSESSION -n "client" "go run $CLIENT"
+read -r SERVERHP <"$1"
+tmux new-session -d -s $TMUXSESSION -n "client" "go run $CLIENT $SERVERHP"
 tmux set-option -t $TMUXSESSION remain-on-exit on
 tmux set-option -t $TMUXSESSION mouse on
 
