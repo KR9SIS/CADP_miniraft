@@ -1,6 +1,10 @@
 package miniraft
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+)
 
 type LogEntry struct {
 	Index       int
@@ -66,49 +70,58 @@ func (message *RaftMessage) MarshalRaftJson() (result []byte, err error) {
 
 // unmarshals the JSON into a RaftMessage.
 func (message *RaftMessage) UnmarshalRaftJSON(b []byte) (msg MessageType, err error) {
-	aer := &AppendEntriesRequest{}
-	err = json.Unmarshal(b, aer)
-	// if the unmarshal was successful and the LeaderId is not empty, then we can assume this is an AppendEntriesRequest message.
-	if err == nil && aer.LeaderId != "" {
+	d := json.NewDecoder(bytes.NewReader(b))
+	d.DisallowUnknownFields()
+	aereq := &AppendEntriesRequest{}
+	err = d.Decode(aereq)
+	if err == nil {
 		msg = AppendEntriesRequestMessage
-		message.Message = aer
+		message.Message = *aereq
 		return
 	}
 
-	if _, ok := err.(*json.UnmarshalTypeError); err != nil && !ok {
-		return
-	}
-
+	d = json.NewDecoder(bytes.NewReader(b))
+	d.DisallowUnknownFields()
 	aeres := &AppendEntriesResponse{}
-	// if the unmarshal was successful and the term is greater than 0, then we can assume this is an AppendEntriesResponse message.
-	if err = json.Unmarshal(b, aeres); err != nil {
-		return
-	}
-	if aeres.Term > 0 {
+	err = d.Decode(aeres)
+	if err == nil {
 		msg = AppendEntriesResponseMessage
-		message.Message = aeres
+		message.Message = *aeres
 		return
 	}
 
-	rvr := &RequestVoteRequest{}
-	// if the unmarshal was successful and the CandidateName is not empty, then we can assume this is a RequestVoteRequest message.
-	if err = json.Unmarshal(b, rvr); err != nil {
-		return
-	}
-	if rvr.Term > 0 && rvr.CandidateName != "" {
+	d = json.NewDecoder(bytes.NewReader(b))
+	d.DisallowUnknownFields()
+	rvreq := &RequestVoteRequest{}
+	err = d.Decode(rvreq)
+	if err == nil {
 		msg = RequestVoteRequestMessage
-		message.Message = rvr
+		message.Message = *rvreq
 		return
 	}
 
+	d = json.NewDecoder(bytes.NewReader(b))
+	d.DisallowUnknownFields()
 	rvres := &RequestVoteResponse{}
-	// if the unmarshal was successful and the term is greater than 0, then we can assume this is a RequestVoteResponse message.
-	if err = json.Unmarshal(b, rvres); err != nil {
+	err = d.Decode(rvres)
+	if err == nil {
+		msg = RequestVoteResponseMessage
+		message.Message = *rvres
 		return
 	}
-	if rvres.Term > 0 {
-		msg = RequestVoteResponseMessage
-		message.Message = rvres
+
+	d = json.NewDecoder(bytes.NewReader(b))
+	d.DisallowUnknownFields()
+	cc := &ClientCommand{}
+	err = d.Decode(cc)
+	if err == nil {
+		msg = ClientCommandMessage
+		message.Message = *cc
+		return
 	}
+
+	msg = -1
+	err = errors.New("Unknown Message Type")
+
 	return
 }

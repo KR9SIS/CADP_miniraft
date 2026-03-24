@@ -402,12 +402,13 @@ func (serv *RaftServer) commitUpTo(n int) {
 }
 
 func (serv *RaftServer) handleMsg(bMsg []byte, addr *net.UDPAddr) {
-	log.Printf("Recv msg from: %v\nmsg: %v", addr, bMsg)
+	log.Printf("Recv %s from: %v\n", bMsg, addr)
 
 	msg := &miniraft.RaftMessage{}
 	msgType, err := msg.UnmarshalRaftJSON(bMsg)
 	if err != nil {
-		log.Printf("error unmarshalling json msg.\nmsg: %v\nerror: %v\n", bMsg, err)
+		log.Printf("error unmarshalling json msg.\tmsg: %s\terror: %v\n", bMsg, err)
+		return
 	}
 
 	switch msgType {
@@ -429,6 +430,9 @@ func (serv *RaftServer) handleMsg(bMsg []byte, addr *net.UDPAddr) {
 	case miniraft.RequestVoteResponseMessage:
 		serv.handleRVResponse(msg.Message.(miniraft.RequestVoteResponse))
 
+	case miniraft.ClientCommandMessage:
+		log.Printf("Client Command: %s", msg.Message.(miniraft.ClientCommand).Command)
+
 	default:
 		log.Printf("error unmarshalling json msg, no such message type.\nmsg: %v\ntype: %v\n", bMsg, msgType)
 	}
@@ -449,7 +453,6 @@ func (serv *RaftServer) serve() (err error) {
 			log.Printf("error recvieving %d bytes from %s: %v\n", n, addr, err)
 			continue
 		}
-		log.Printf("recieved \"%s\" from %s", buffer[0:n], addr) // WARN: Maybe remove
 		msg := make([]byte, n)
 		copy(msg, buffer[:n])
 		go serv.handleMsg(msg, addr)
