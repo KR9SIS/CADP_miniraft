@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"fmt"
 	"log"
 	"math/rand"
 	"net"
@@ -65,13 +67,13 @@ type RaftServer struct {
 type ServerState int
 
 const (
-	Failed ServerState = iota
+	Suspended ServerState = iota
 	Follower
 	Candidate
 	Leader
 )
 
-var serverStateStr = [...]string{"Failed", "Follower", "Candidate", "Leader"}
+var serverStateStr = [...]string{"Suspended", "Follower", "Candidate", "Leader"}
 
 // INFO:
 // Safely changes the servers state
@@ -81,8 +83,8 @@ func (serv *RaftServer) changeState(state ServerState) {
 	defer serv.stateLock.Unlock()
 
 	switch state {
-	case Failed:
-		serv.state = Failed
+	case Suspended:
+		serv.state = Suspended
 	case Follower:
 		serv.state = Follower
 		serv.votedFor = ""
@@ -414,7 +416,7 @@ func (serv *RaftServer) handleMsg(bMsg []byte, addr *net.UDPAddr) {
 	switch msgType {
 	case miniraft.AppendEntriesRequestMessage:
 		resp := serv.handleAERequest(msg.Message.(miniraft.AppendEntriesRequest), addr)
-		if serv.state != Failed {
+		if serv.state != Suspended {
 			serv.sendMsg(resp, addr)
 		}
 
@@ -423,7 +425,7 @@ func (serv *RaftServer) handleMsg(bMsg []byte, addr *net.UDPAddr) {
 
 	case miniraft.RequestVoteRequestMessage:
 		resp := serv.handleRVRequest(msg.Message.(miniraft.RequestVoteRequest))
-		if serv.state != Failed {
+		if serv.state != Suspended {
 			serv.sendMsg(resp, addr)
 		}
 
@@ -435,6 +437,37 @@ func (serv *RaftServer) handleMsg(bMsg []byte, addr *net.UDPAddr) {
 
 	default:
 		log.Printf("error unmarshalling json msg, no such message type.\nmsg: %v\ntype: %v\n", bMsg, msgType)
+	}
+}
+
+func (serv *RaftServer) getStdin() {
+	scanner := bufio.NewScanner(os.Stdin)
+	oldState := serv.state
+	for scanner.Scan() {
+		switch cmd := scanner.Text(); cmd {
+		case "log":
+			for entry := range serv.log {
+				fmt.Printf("%+v\n", entry)
+			}
+		case "print":
+			fmt.Printf("currentTerm: %d, votedFor: %s, state: %s, commitIndex: %d, lastApplied: %d, nextIndex:", serv.currentTerm.Load(), serv.votedFor, serverStateStr[serv.state], serv.commitIndex.Load(), serv.lastApplied.Load())
+			for i := range serv.nextIndex {
+				fmt.Printf(" %d", i)
+			}
+			fmt.Printf(", matchIndex:")
+			for i := range serv.matchIndex {
+				fmt.Printf(" %d", i)
+			}
+			fmt.Printf("\n")
+
+		case "resume":
+			serv.changeState(oldState)
+		case "suspend":
+			oldState = serv.state
+			serv.changeState(Suspended)
+		default:
+			log.Printf("Command '%s' not regognized, valid commands are: 'log', 'print', 'resume', & 'suspend'", cmd)
+		}
 	}
 }
 
@@ -520,7 +553,6 @@ func main() {
 	defer f.Close()
 	serv.logFile = f
 
-	log.Printf("%+v\n", serv)
-
+	go serv.getStdin()
 	serv.serve()
 }
