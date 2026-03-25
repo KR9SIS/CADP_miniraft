@@ -36,7 +36,7 @@ type RaftServer struct {
 	state     ServerState
 	stateLock sync.Mutex
 
-	eTimeout *time.Ticker
+	eTimeout *time.Timer
 	votes    atomic.Int64
 	// list of other servers in the cluster, used to send messages to other servers.
 	servers []*net.UDPAddr
@@ -384,7 +384,7 @@ func (serv *RaftServer) handleRVResponse(res miniraft.RequestVoteResponse) {
 func (serv *RaftServer) logEntry(entry miniraft.LogEntry) (err error) {
 	term := strconv.Itoa(entry.Term)
 	idx := strconv.Itoa(entry.Index)
-	if _, err := serv.logFile.Write([]byte(term + "," + idx + "," + entry.CommandName)); err != nil {
+	if _, err := serv.logFile.Write([]byte(term + "," + idx + "," + entry.CommandName + "\n")); err != nil {
 		return err
 	}
 	return nil
@@ -492,6 +492,22 @@ func (serv *RaftServer) serve() (err error) {
 	}
 }
 
+func (serv *RaftServer) electionTimeoutLoop() {
+	for {
+		<-serv.eTimeout.C
+		switch serv.state {
+		case Follower:
+			serv.changeState(Candidate)
+		case Candidate:
+			serv.changeState(Candidate)
+		case Leader, Suspended:
+			// Leaders send heartbeats, they don't watch the election timer.
+			// Suspended servers don't participate in elections.
+			serv.resetTimeout()
+		}
+	}
+}
+
 func (serv *RaftServer) resetTimeout() {
 	timeout := rand.Intn(maxElectionTimeout-minElectionTimeout) + minElectionTimeout
 	d := time.Duration(timeout) * time.Millisecond
@@ -514,7 +530,7 @@ func main() {
 	serv := &RaftServer{
 		id:       id,
 		state:    Follower,
-		eTimeout: time.NewTicker(999999),
+		eTimeout: time.NewTimer(time.Second),
 	}
 	defer serv.eTimeout.Stop()
 	serv.resetTimeout()
@@ -553,6 +569,9 @@ func main() {
 	defer f.Close()
 	serv.logFile = f
 
+	log.Printf("%+v\n", serv)
+
 	go serv.getStdin()
+	go serv.electionTimeoutLoop()
 	serv.serve()
 }
