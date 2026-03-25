@@ -95,6 +95,10 @@ func (serv *RaftServer) changeState(state ServerState) {
 	case Leader:
 		serv.state = Leader
 		serv.votedFor = ""
+		for i := range serv.servers {
+			serv.nextIndex[i].Store(int64(len(serv.log)))
+			serv.matchIndex[i].Store(0)
+		}
 		go serv.sendHeartBeats()
 	}
 	log.Printf("Changed %s state to %s\n", serv.id, serverStateStr[serv.state])
@@ -107,7 +111,7 @@ func (serv *RaftServer) startElection() {
 	serv.resetTimeout()
 	serv.votedFor = serv.id
 	for _, s := range serv.servers {
-		lLE := serv.log[int(serv.lastApplied.Load())]
+		lLE := serv.log[len(serv.log)-1]
 		rVReq := &miniraft.RequestVoteRequest{
 			Term:          int(serv.currentTerm.Load()),
 			LastLogIndex:  lLE.Index,
