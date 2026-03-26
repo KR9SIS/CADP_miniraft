@@ -306,7 +306,7 @@ func main() {
 	serv.servers = servers
 
 	// filename = host-port.log
-	filename := serv.addr.IP.String() + "-" + strconv.Itoa(serv.addr.Port) + ".log"
+	filename := "log/" + serv.addr.IP.String() + "-" + strconv.Itoa(serv.addr.Port) + ".log"
 	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		log.Fatalf("error reading %s file: %v", filename, err)
