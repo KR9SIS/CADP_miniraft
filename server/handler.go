@@ -215,7 +215,7 @@ func (serv *RaftServer) handleClientCommand(cmd miniraft.ClientCommand) {
 			CommandName: cmd.Command,
 		}
 		serv.log = append(serv.log, entry)
-		log.Printf("Leader appended entry %d: %s\n", entry.Index, entry.CommandName)
+		log.Printf("Leader appended client command entry %d: %s\n", entry.Index, entry.CommandName)
 
 		// Immediately send AppendEntries to all followers with the new entry
 		for i, s := range serv.servers {
@@ -302,7 +302,6 @@ func (serv *RaftServer) handleMsg(sMsg serv_msg) {
 
 	case miniraft.ClientCommandMessage:
 		cmd := msg.Message.(miniraft.ClientCommand)
-		log.Printf("Client Command: %s", cmd.Command)
 		serv.handleClientCommand(cmd)
 
 	default:

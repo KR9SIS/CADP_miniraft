@@ -270,7 +270,7 @@ func main() {
 	sMsgChan := make(chan serv_msg, 100)
 	stdinChan := make(chan string)
 
-	go serv.getStdin(stdinChan)
 	go serv.handler(sMsgChan, stdinChan)
+	go serv.getStdin(stdinChan)
 	serv.serve(sMsgChan)
 }
