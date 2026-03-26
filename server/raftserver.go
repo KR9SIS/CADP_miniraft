@@ -265,7 +265,7 @@ func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest, addr 
 	}
 
 	// If we are a candidate or leader and the incoming term is higher, step down.
-	// We don't touch Failed servers here — they stay Failed until a resume command.
+	// We don't touch Failed servers here, they stay Failed until a resume command.
 	if (serv.state == Candidate || serv.state == Leader) && req.Term > int(serv.currentTerm.Load()) {
 		serv.currentTerm.Store(int64(req.Term))
 		serv.changeState(Follower)
@@ -278,33 +278,32 @@ func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest, addr 
 		return resp
 	}
 
-	// Heartbeat, no entries to append, just reset our election timeout
+	serv.resetTimeout()
+
 	if len(req.LogEntries) == 0 {
 		log.Printf("Heartbeat received from %s\n", addr.String())
-		resp.Success = true
-		serv.resetTimeout()
-		return resp
+	} else {
+		// 2. Reject if our log doesn't have the entry the leader expects just before the new ones.
+		// PrevLogIndex is the index of the entry right before what the leader is sending.
+		// If we don't have that entry, or its term doesn't match, our logs have diverged.
+		if req.PrevLogIndex > len(serv.log)-1 {
+			log.Printf("handleAERequest: rejected from %s, missing entry at PrevLogIndex %d\n", addr.String(), req.PrevLogIndex)
+			resp.Success = false
+			return resp
+		}
+		if serv.log[req.PrevLogIndex].Term != req.PrevLogTerm {
+			log.Printf("handleAERequest: rejected from %s, term mismatch at PrevLogIndex %d\n", addr.String(), req.PrevLogIndex)
+			resp.Success = false
+			return resp
+		}
+
+		// 3. & 4. Truncate any conflicting entries and append the new ones.
+		// We keep everything up to and including PrevLogIndex, then replace the rest with what the leader sent.
+		serv.log = append(serv.log[:req.PrevLogIndex+1], req.LogEntries...)
+		log.Printf("handleAERequest: appended %d entries from %s\n", len(req.LogEntries), addr.String())
 	}
 
-	// 2. Reject if our log doesn't have the entry the leader expects just before the new ones.
-	// PrevLogIndex is the index of the entry right before what the leader is sending.
-	// If we don't have that entry, or its term doesn't match, our logs have diverged.
-	if req.PrevLogIndex > len(serv.log)-1 {
-		log.Printf("handleAERequest: rejected from %s, missing entry at PrevLogIndex %d\n", addr.String(), req.PrevLogIndex)
-		resp.Success = false
-		return resp
-	}
-	if serv.log[req.PrevLogIndex].Term != req.PrevLogTerm {
-		log.Printf("handleAERequest: rejected from %s, term mismatch at PrevLogIndex %d\n", addr.String(), req.PrevLogIndex)
-		resp.Success = false
-		return resp
-	}
-
-	// 3. & 4. Truncate any conflicting entries and append the new ones.
-	// We keep everything up to and including PrevLogIndex, then replace the rest with what the leader sent.
-	serv.log = append(serv.log[:req.PrevLogIndex+1], req.LogEntries...)
 	resp.Success = true
-	log.Printf("handleAERequest: appended %d entries from %s\n", len(req.LogEntries), addr.String())
 
 	// 5. Advance commitIndex to match the leader's, then write newly committed entries to the log file
 	if req.LeaderCommit > int(serv.commitIndex.Load()) {
