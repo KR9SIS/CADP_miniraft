@@ -268,12 +268,21 @@ func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest, addr 
 		Term: int(serv.currentTerm.Load()),
 	}
 
-	// If we are a candidate or leader and the incoming term is higher, step down.
-	// We don't touch Failed servers here, they stay Failed until a resume command.
-	if (serv.state == Candidate || serv.state == Leader) && req.Term > int(serv.currentTerm.Load()) {
+	// If the incoming term is higher than ours, update our term and step down to follower.
+	// Per Raft: "If RPC request or response contains term T > currentTerm:
+	// set currentTerm = T, convert to follower." Applies to ALL server roles.
+	if req.Term > int(serv.currentTerm.Load()) {
 		serv.currentTerm.Store(int64(req.Term))
-		serv.changeState(Follower)
+		if serv.state != Follower {
+			serv.changeState(Follower)
+		} else {
+			// Already a follower — just clear votedFor for the new term
+			serv.votedFor = ""
+		}
 	}
+
+	// Update the response term after potential update above
+	resp.Term = int(serv.currentTerm.Load())
 
 	// 1. Reject if the request is from a stale leader
 	if req.Term < int(serv.currentTerm.Load()) {
@@ -326,12 +335,21 @@ func (serv *RaftServer) handleRVRequest(req miniraft.RequestVoteRequest) miniraf
 		Term: int(serv.currentTerm.Load()),
 	}
 
-	// If we are a candidate or leader and the incoming term is higher, step down.
-	// Failed servers stay Failed until a resume command.
-	if (serv.state == Candidate || serv.state == Leader) && req.Term > int(serv.currentTerm.Load()) {
+	// If the incoming term is higher than ours, update our term and step down to follower.
+	// Per Raft: "If RPC request or response contains term T > currentTerm:
+	// set currentTerm = T, convert to follower." Applies to ALL server roles.
+	if req.Term > int(serv.currentTerm.Load()) {
 		serv.currentTerm.Store(int64(req.Term))
-		serv.changeState(Follower)
+		if serv.state != Follower {
+			serv.changeState(Follower)
+		} else {
+			// Already a follower — just clear votedFor for the new term
+			serv.votedFor = ""
+		}
 	}
+
+	// Update the response term after potential update above
+	resp.Term = int(serv.currentTerm.Load())
 
 	// 1. Deny if the candidate's term is less than ours
 	if req.Term < int(serv.currentTerm.Load()) {
@@ -423,21 +441,22 @@ func (serv *RaftServer) handleMsg(bMsg []byte, addr *net.UDPAddr) {
 	serv.mu.Lock()
 	defer serv.mu.Unlock()
 
+	// Suspended servers receive messages but do not process or respond to them.
+	if serv.state == Suspended {
+		return
+	}
+
 	switch msgType {
 	case miniraft.AppendEntriesRequestMessage:
 		resp := serv.handleAERequest(msg.Message.(miniraft.AppendEntriesRequest), addr)
-		if serv.state != Suspended {
-			serv.sendMsg(resp, addr)
-		}
+		serv.sendMsg(resp, addr)
 
 	case miniraft.AppendEntriesResponseMessage:
 		serv.handleAEResponse(msg.Message.(miniraft.AppendEntriesResponse), addr)
 
 	case miniraft.RequestVoteRequestMessage:
 		resp := serv.handleRVRequest(msg.Message.(miniraft.RequestVoteRequest))
-		if serv.state != Suspended {
-			serv.sendMsg(resp, addr)
-		}
+		serv.sendMsg(resp, addr)
 
 	case miniraft.RequestVoteResponseMessage:
 		serv.handleRVResponse(msg.Message.(miniraft.RequestVoteResponse))
