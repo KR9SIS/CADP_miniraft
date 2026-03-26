@@ -204,22 +204,6 @@ func (serv *RaftServer) serve(c chan<- serv_msg) (err error) {
 	}
 }
 
-func (serv *RaftServer) electionTimeoutLoop() {
-	for {
-		<-serv.eTimeout.C
-		switch serv.state {
-		case Follower:
-			serv.changeState(Candidate)
-		case Candidate:
-			serv.changeState(Candidate)
-		case Leader, Suspended:
-			// Leaders send heartbeats, they don't watch the election timer.
-			// Suspended servers don't participate in elections.
-			serv.resetTimeout()
-		}
-	}
-}
-
 func (serv *RaftServer) resetTimeout() {
 	timeout := rand.Intn(maxElectionTimeout-minElectionTimeout) + minElectionTimeout
 	d := time.Duration(timeout) * time.Millisecond
@@ -287,7 +271,6 @@ func main() {
 	stdinChan := make(chan string)
 
 	go serv.getStdin(stdinChan)
-	go serv.electionTimeoutLoop()
 	go serv.handler(sMsgChan, stdinChan)
 	serv.serve(sMsgChan)
 }
