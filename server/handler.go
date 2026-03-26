@@ -322,10 +322,9 @@ func (serv *RaftServer) handler(c <-chan serv_msg, strChan <-chan string) {
 
 		case <-serv.eTimeout.C:
 			switch serv.state {
-			case Follower:
+			case Follower, Candidate:
 				serv.changeState(Candidate)
-			case Candidate:
-				serv.changeState(Candidate)
+
 			case Leader, Suspended:
 				// Leaders send heartbeats, they don't watch the election timer.
 				// Suspended servers don't participate in elections.
