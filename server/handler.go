@@ -319,6 +319,11 @@ func (serv *RaftServer) handler(c <-chan serv_msg, strChan <-chan string) {
 		case str := <-strChan:
 			oldState = serv.handleStdin(str, oldState)
 
+		case <-serv.heartbeatTicker.C:
+			if serv.state == Leader {
+				serv.sendHeartBeats()
+			}
+
 		case <-serv.eTimeout.C:
 			switch serv.state {
 			case Follower, Candidate:

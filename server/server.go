@@ -18,6 +18,9 @@ import (
 // Spawns extra go routines to unlock stateLock
 // changeState changes the server's state. Caller must hold serv.mu.Lock().
 func (serv *RaftServer) changeState(state ServerState) {
+	// Stop the heartbeat ticker whenever leaving Leader state
+	serv.heartbeatTicker.Stop()
+
 	switch state {
 	case Suspended:
 		serv.state = Suspended
@@ -36,7 +39,10 @@ func (serv *RaftServer) changeState(state ServerState) {
 			serv.nextIndex[i] = len(serv.log)
 			serv.matchIndex[i] = 0
 		}
-		go serv.sendHeartBeats()
+		serv.heartbeatTicker.Reset(time.Millisecond * heartbeatTimeout)
+		// Send the first heartbeat right away so followers know we're the leader
+		// instead of waiting 75ms for the ticker to fire
+		serv.sendHeartBeats()
 	}
 	log.Printf("Changed %s state to %s\n", serv.id, serverStateStr[serv.state])
 }
@@ -60,20 +66,13 @@ func (serv *RaftServer) startElection() {
 	}
 }
 
+// sendHeartBeats sends a single round of AppendEntries (heartbeats or pending entries) to all followers.
+// Called from the handler event loop on each heartbeat tick, not in a separate goroutine.
 func (serv *RaftServer) sendHeartBeats() {
 	log.Printf("%s sending heartbeats\n", serv.id)
-	ticker := time.NewTicker(time.Millisecond * 75)
-	defer ticker.Stop()
-	for {
-		<-ticker.C
-		if serv.state != Leader {
-			return
-		}
-		for i, s := range serv.servers {
-			nextIdx := serv.nextIndex[i]
-			// Send any pending entries, or an empty slice if the follower is up to date (heartbeat)
-			serv.sendAERequest(nextIdx, s, serv.log[nextIdx:])
-		}
+	for i, s := range serv.servers {
+		nextIdx := serv.nextIndex[i]
+		serv.sendAERequest(nextIdx, s, serv.log[nextIdx:])
 	}
 }
 
@@ -223,12 +222,16 @@ func main() {
 	}
 
 	servers := make([]*net.UDPAddr, 0, 3)
+	hbTicker := time.NewTicker(time.Millisecond * heartbeatTimeout)
+	hbTicker.Stop() // stopped initially; started when becoming Leader
 	serv := &RaftServer{
-		id:       id,
-		state:    Follower,
-		eTimeout: time.NewTimer(time.Second),
+		id:              id,
+		state:           Follower,
+		eTimeout:        time.NewTimer(time.Second),
+		heartbeatTicker: hbTicker,
 	}
 	defer serv.eTimeout.Stop()
+	defer serv.heartbeatTicker.Stop()
 	serv.resetTimeout()
 	valid_id := false
 

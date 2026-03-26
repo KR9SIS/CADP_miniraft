@@ -27,9 +27,10 @@ type RaftServer struct {
 	logFile *os.File
 	state   ServerState
 
-	eTimeout   *time.Timer
-	votes      int
-	leaderAddr *net.UDPAddr
+	eTimeout        *time.Timer
+	heartbeatTicker *time.Ticker
+	votes           int
+	leaderAddr      *net.UDPAddr
 	// list of other servers in the cluster, used to send messages to other servers.
 	servers []*net.UDPAddr
 
