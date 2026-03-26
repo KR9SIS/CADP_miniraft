@@ -639,8 +639,8 @@ func main() {
 	serv.inflightIndex = make([]atomic.Int64, len(servers))
 	serv.servers = servers
 
-	// filename = server-host-port.log
-	filename := "server-" + serv.addr.IP.String() + "-" + strconv.Itoa(serv.addr.Port) + ".log"
+	// filename = host-port.log
+	filename := serv.addr.IP.String() + "-" + strconv.Itoa(serv.addr.Port) + ".log"
 	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		log.Fatalf("error reading %s file: %v", filename, err)
