@@ -3,7 +3,6 @@ package main
 import (
 	"net"
 	"os"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -28,7 +27,6 @@ type RaftServer struct {
 	conn    *net.UDPConn
 	logFile *os.File
 	state   ServerState
-	mu      sync.RWMutex
 
 	eTimeout   *time.Timer
 	votes      atomic.Int64
@@ -69,3 +67,8 @@ const (
 )
 
 var serverStateStr = [...]string{"Suspended", "Follower", "Candidate", "Leader"}
+
+type serv_msg struct {
+	addr *net.UDPAddr
+	bMsg []byte
+}

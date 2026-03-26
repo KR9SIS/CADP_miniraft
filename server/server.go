@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"fmt"
 	"log"
 	"math/rand"
 	"net"
@@ -68,9 +67,7 @@ func (serv *RaftServer) sendHeartBeats() {
 	defer ticker.Stop()
 	for {
 		<-ticker.C
-		serv.mu.RLock()
 		if serv.state != Leader {
-			serv.mu.RUnlock()
 			return
 		}
 		for i, s := range serv.servers {
@@ -78,7 +75,6 @@ func (serv *RaftServer) sendHeartBeats() {
 			// Send any pending entries, or an empty slice if the follower is up to date (heartbeat)
 			serv.sendAERequest(nextIdx, s, serv.log[nextIdx:])
 		}
-		serv.mu.RUnlock()
 	}
 }
 
@@ -178,45 +174,14 @@ func (serv *RaftServer) commitUpTo(n int) {
 	log.Printf("commitUpTo: committed up to index %d\n", n)
 }
 
-func (serv *RaftServer) getStdin() {
+func (serv *RaftServer) getStdin(c chan<- string) {
 	scanner := bufio.NewScanner(os.Stdin)
-	var oldState ServerState
 	for scanner.Scan() {
-		switch cmd := scanner.Text(); cmd {
-		case "log":
-			serv.mu.RLock()
-			for _, entry := range serv.log {
-				fmt.Printf("%+v\n", entry)
-			}
-			serv.mu.RUnlock()
-		case "print":
-			serv.mu.RLock()
-			fmt.Printf("currentTerm: %d, votedFor: %s, state: %s, commitIndex: %d, lastApplied: %d, nextIndex:", serv.currentTerm.Load(), serv.votedFor, serverStateStr[serv.state], serv.commitIndex.Load(), serv.lastApplied.Load())
-			for i := range serv.nextIndex {
-				fmt.Printf(" %d", serv.nextIndex[i].Load())
-			}
-			fmt.Printf(", matchIndex:")
-			for i := range serv.matchIndex {
-				fmt.Printf(" %d", serv.matchIndex[i].Load())
-			}
-			fmt.Printf("\n")
-			serv.mu.RUnlock()
-		case "resume":
-			serv.mu.Lock()
-			serv.changeState(oldState)
-			serv.mu.Unlock()
-		case "suspend":
-			serv.mu.Lock()
-			oldState = serv.state
-			serv.changeState(Suspended)
-			serv.mu.Unlock()
-		default:
-			log.Printf("Command '%s' not regognized, valid commands are: 'log', 'print', 'resume', & 'suspend'", cmd)
-		}
+		c <- scanner.Text()
 	}
 }
 
-func (serv *RaftServer) serve() (err error) {
+func (serv *RaftServer) serve(c chan<- serv_msg) (err error) {
 	serverConn, err := net.ListenUDP("udp", serv.addr)
 	if err != nil {
 		log.Fatalf("failed to listen on port %d: %v\n", serv.addr.Port, err)
@@ -231,16 +196,18 @@ func (serv *RaftServer) serve() (err error) {
 			log.Printf("error recvieving %d bytes from %s: %v\n", n, addr, err)
 			continue
 		}
-		msg := make([]byte, n)
-		copy(msg, buffer[:n])
-		go serv.handleMsg(msg, addr)
+		sMsg := serv_msg{
+			addr: addr,
+			bMsg: make([]byte, n),
+		}
+		copy(sMsg.bMsg, buffer[:n])
+		c <- sMsg
 	}
 }
 
 func (serv *RaftServer) electionTimeoutLoop() {
 	for {
 		<-serv.eTimeout.C
-		serv.mu.Lock()
 		switch serv.state {
 		case Follower:
 			serv.changeState(Candidate)
@@ -251,7 +218,6 @@ func (serv *RaftServer) electionTimeoutLoop() {
 			// Suspended servers don't participate in elections.
 			serv.resetTimeout()
 		}
-		serv.mu.Unlock()
 	}
 }
 
@@ -318,7 +284,11 @@ func main() {
 
 	log.Printf("%+v\n", serv)
 
-	go serv.getStdin()
+	sMsgChan := make(chan serv_msg, 100)
+	stdinChan := make(chan string)
+
+	go serv.getStdin(stdinChan)
 	go serv.electionTimeoutLoop()
-	serv.serve()
+	go serv.handler(sMsgChan, stdinChan)
+	serv.serve(sMsgChan)
 }

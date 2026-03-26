@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net"
 
@@ -194,7 +195,7 @@ func (serv *RaftServer) handleRVResponse(res miniraft.RequestVoteResponse) {
 		return
 	}
 	serv.votes.Add(1)
-	if int(serv.votes.Load()) >= (len(serv.servers)/2)+1 {
+	if (int(serv.votes.Load()) >= (len(serv.servers)/2)+1) && serv.state != Leader {
 		serv.changeState(Leader)
 	}
 }
@@ -235,16 +236,43 @@ func (serv *RaftServer) handleClientCommand(cmd miniraft.ClientCommand) {
 	}
 }
 
-func (serv *RaftServer) handleMsg(bMsg []byte, addr *net.UDPAddr) {
+func (serv *RaftServer) handleStdin(str string, oldState ServerState) ServerState {
+	switch str {
+	case "log":
+		for _, entry := range serv.log {
+			fmt.Printf("%+v\n", entry)
+		}
+	case "print":
+		fmt.Printf("currentTerm: %d, votedFor: %s, state: %s, commitIndex: %d, lastApplied: %d, nextIndex:", serv.currentTerm.Load(), serv.votedFor, serverStateStr[serv.state], serv.commitIndex.Load(), serv.lastApplied.Load())
+		for i := range serv.nextIndex {
+			fmt.Printf(" %d", serv.nextIndex[i].Load())
+		}
+		fmt.Printf(", matchIndex:")
+		for i := range serv.matchIndex {
+			fmt.Printf(" %d", serv.matchIndex[i].Load())
+		}
+		fmt.Printf("\n")
+	case "resume":
+		serv.changeState(oldState)
+	case "suspend":
+		oldState = serv.state
+		serv.changeState(Suspended)
+	default:
+		log.Printf("Command '%s' not regognized, valid commands are: 'log', 'print', 'resume', & 'suspend'", str)
+	}
+
+	return oldState
+}
+
+func (serv *RaftServer) handleMsg(sMsg serv_msg) {
+	bMsg := sMsg.bMsg
+	addr := sMsg.addr
 	msg := &miniraft.RaftMessage{}
 	msgType, err := msg.UnmarshalRaftJSON(bMsg)
 	if err != nil {
 		log.Printf("error unmarshalling json msg.\tmsg: %s\terror: %v\n", bMsg, err)
 		return
 	}
-
-	serv.mu.Lock()
-	defer serv.mu.Unlock()
 
 	// Suspended servers receive messages but do not process or respond to them.
 	if serv.state == Suspended {
@@ -273,5 +301,17 @@ func (serv *RaftServer) handleMsg(bMsg []byte, addr *net.UDPAddr) {
 
 	default:
 		log.Printf("error unmarshalling json msg, no such message type.\nmsg: %v\ntype: %v\n", bMsg, msgType)
+	}
+}
+
+func (serv *RaftServer) handler(c <-chan serv_msg, strChan <-chan string) {
+	var oldState ServerState
+	for {
+		select {
+		case sMsg := <-c:
+			serv.handleMsg(sMsg)
+		case str := <-strChan:
+			oldState = serv.handleStdin(str, oldState)
+		}
 	}
 }
