@@ -36,8 +36,9 @@ type RaftServer struct {
 	state ServerState
 	mu    sync.RWMutex
 
-	eTimeout *time.Timer
-	votes    atomic.Int64
+	eTimeout   *time.Timer
+	votes      atomic.Int64
+	leaderAddr *net.UDPAddr
 	// list of other servers in the cluster, used to send messages to other servers.
 	servers []*net.UDPAddr
 
@@ -89,6 +90,7 @@ func (serv *RaftServer) changeState(state ServerState) {
 		serv.resetTimeout()
 	case Candidate:
 		serv.state = Candidate
+		serv.leaderAddr = nil
 		serv.startElection()
 	case Leader:
 		serv.state = Leader
@@ -133,7 +135,9 @@ func (serv *RaftServer) sendHeartBeats() {
 			return
 		}
 		for i, s := range serv.servers {
-			serv.sendAERequest(int(serv.nextIndex[i].Load()), s, []miniraft.LogEntry{})
+			nextIdx := int(serv.nextIndex[i].Load())
+			// Send any pending entries, or an empty slice if the follower is up to date (heartbeat)
+			serv.sendAERequest(nextIdx, s, serv.log[nextIdx:])
 		}
 		serv.mu.RUnlock()
 	}
@@ -292,26 +296,25 @@ func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest, addr 
 	}
 
 	serv.resetTimeout()
+	serv.leaderAddr = addr
 
-	if len(req.LogEntries) == 0 {
-		log.Printf("Heartbeat received from %s\n", addr.String())
-	} else {
-		// 2. Reject if our log doesn't have the entry the leader expects just before the new ones.
-		// PrevLogIndex is the index of the entry right before what the leader is sending.
-		// If we don't have that entry, or its term doesn't match, our logs have diverged.
-		if req.PrevLogIndex > len(serv.log)-1 {
-			log.Printf("handleAERequest: rejected from %s, missing entry at PrevLogIndex %d\n", addr.String(), req.PrevLogIndex)
-			resp.Success = false
-			return resp
-		}
-		if serv.log[req.PrevLogIndex].Term != req.PrevLogTerm {
-			log.Printf("handleAERequest: rejected from %s, term mismatch at PrevLogIndex %d\n", addr.String(), req.PrevLogIndex)
-			resp.Success = false
-			return resp
-		}
+	// 2. Reject if our log doesn't have an entry at PrevLogIndex whose term matches PrevLogTerm.
+	// This check runs for both heartbeats and real entries — a heartbeat is just an
+	// AppendEntries with an empty LogEntries array.
+	if req.PrevLogIndex > len(serv.log)-1 {
+		log.Printf("handleAERequest: rejected from %s, missing entry at PrevLogIndex %d\n", addr.String(), req.PrevLogIndex)
+		resp.Success = false
+		return resp
+	}
+	if serv.log[req.PrevLogIndex].Term != req.PrevLogTerm {
+		log.Printf("handleAERequest: rejected from %s, term mismatch at PrevLogIndex %d\n", addr.String(), req.PrevLogIndex)
+		resp.Success = false
+		return resp
+	}
 
-		// 3. & 4. Truncate any conflicting entries and append the new ones.
-		// We keep everything up to and including PrevLogIndex, then replace the rest with what the leader sent.
+	// 3. & 4. Truncate any conflicting entries and append the new ones.
+	// When LogEntries is empty, a heartbeat, we can skip appending.
+	if len(req.LogEntries) > 0 {
 		serv.log = append(serv.log[:req.PrevLogIndex+1], req.LogEntries...)
 		log.Printf("handleAERequest: appended %d entries from %s\n", len(req.LogEntries), addr.String())
 	}
@@ -428,6 +431,42 @@ func (serv *RaftServer) commitUpTo(n int) {
 	log.Printf("commitUpTo: committed up to index %d\n", n)
 }
 
+// handleClientCommand processes a client command based on the server's role.
+// Leader: appends the command to the log and sends AppendEntries to all followers.
+// Follower: forwards the command to the known leader.
+// Candidate: drops the command (no leader to forward to).
+// Caller must hold serv.mu.Lock().
+func (serv *RaftServer) handleClientCommand(cmd miniraft.ClientCommand, addr *net.UDPAddr) {
+	switch serv.state {
+	case Leader:
+		// Append the new entry to the leader's own log
+		entry := miniraft.LogEntry{
+			Index:       len(serv.log),
+			Term:        int(serv.currentTerm.Load()),
+			CommandName: cmd.Command,
+		}
+		serv.log = append(serv.log, entry)
+		log.Printf("Leader appended entry %d: %s\n", entry.Index, entry.CommandName)
+
+		// Immediately send AppendEntries to all followers with the new entry
+		for i, s := range serv.servers {
+			nextIdx := int(serv.nextIndex[i].Load())
+			serv.sendAERequest(nextIdx, s, serv.log[nextIdx:])
+		}
+
+	case Follower:
+		if serv.leaderAddr != nil {
+			log.Printf("Forwarding client command %q to leader %s\n", cmd.Command, serv.leaderAddr.String())
+			serv.sendMsg(&cmd, serv.leaderAddr)
+		} else {
+			log.Printf("No known leader, dropping client command %q\n", cmd.Command)
+		}
+
+	case Candidate:
+		log.Printf("Candidate, dropping client command %q\n", cmd.Command)
+	}
+}
+
 func (serv *RaftServer) handleMsg(bMsg []byte, addr *net.UDPAddr) {
 	log.Printf("Recv %s from: %v\n", bMsg, addr)
 
@@ -462,7 +501,9 @@ func (serv *RaftServer) handleMsg(bMsg []byte, addr *net.UDPAddr) {
 		serv.handleRVResponse(msg.Message.(miniraft.RequestVoteResponse))
 
 	case miniraft.ClientCommandMessage:
-		log.Printf("Client Command: %s", msg.Message.(miniraft.ClientCommand).Command)
+		cmd := msg.Message.(miniraft.ClientCommand)
+		log.Printf("Client Command: %s", cmd.Command)
+		serv.handleClientCommand(cmd, addr)
 
 	default:
 		log.Printf("error unmarshalling json msg, no such message type.\nmsg: %v\ntype: %v\n", bMsg, msgType)
