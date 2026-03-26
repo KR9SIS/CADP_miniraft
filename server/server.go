@@ -120,7 +120,9 @@ func (serv *RaftServer) sendAERequest(nextIndex int, addr *net.UDPAddr, entries 
 		LeaderCommit: int(serv.commitIndex.Load()),
 		LogEntries:   entries,
 	}
-	log.Printf("%s sending AER to %s\n", serv.id, addr.String())
+	if len(entries) != 0 {
+		log.Printf("%s sending AER to %s\n", serv.id, addr.String())
+	}
 	serv.sendMsg(aer, addr)
 }
 

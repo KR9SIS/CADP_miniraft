@@ -98,8 +98,6 @@ func (serv *RaftServer) handleAEResponse(res miniraft.AppendEntriesResponse, add
 	}
 
 	if res.Success {
-		log.Printf("AEResponse from %s: success\n", addr.String())
-
 		// Update nextIndex and matchIndex based on what we actually sent (inflightIndex)
 		// We can't just use len(log) here because new entries might have been added since we sent the request
 		lastSent := int(serv.inflightIndex[i].Load())
@@ -238,8 +236,6 @@ func (serv *RaftServer) handleClientCommand(cmd miniraft.ClientCommand) {
 }
 
 func (serv *RaftServer) handleMsg(bMsg []byte, addr *net.UDPAddr) {
-	log.Printf("Recv %s from: %v\n", bMsg, addr)
-
 	msg := &miniraft.RaftMessage{}
 	msgType, err := msg.UnmarshalRaftJSON(bMsg)
 	if err != nil {
