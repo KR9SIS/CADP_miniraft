@@ -243,7 +243,13 @@ func (serv *RaftServer) handleStdin(str string, oldState ServerState) ServerStat
 			fmt.Printf("%+v\n", entry)
 		}
 	case "print":
-		fmt.Printf("currentTerm: %d, votedFor: %s, state: %s, commitIndex: %d, lastApplied: %d, nextIndex:", serv.currentTerm, serv.votedFor, serverStateStr[serv.state], serv.commitIndex, serv.lastApplied)
+		var state string
+		if serv.state == Suspended {
+			state = fmt.Sprintf("%s, oldState: %s", serverStateStr[serv.state], serverStateStr[oldState])
+		} else {
+			state = serverStateStr[serv.state]
+		}
+		fmt.Printf("currentTerm: %d, votedFor: %s, state: %s, commitIndex: %d, lastApplied: %d, nextIndex:", serv.currentTerm, serv.votedFor, state, serv.commitIndex, serv.lastApplied)
 		for i := range serv.nextIndex {
 			fmt.Printf(" %d", serv.nextIndex[i])
 		}
