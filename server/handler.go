@@ -20,14 +20,14 @@ import (
 // commitIndex = min(leaderCommit, index of last new entry)
 func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest, addr *net.UDPAddr) miniraft.AppendEntriesResponse {
 	resp := miniraft.AppendEntriesResponse{
-		Term: int(serv.currentTerm.Load()),
+		Term: serv.currentTerm,
 	}
 
 	// If the incoming term is higher than ours, update our term and step down to follower.
 	// Per Raft: "If RPC request or response contains term T > currentTerm:
 	// set currentTerm = T, convert to follower." Applies to ALL server roles.
-	if req.Term > int(serv.currentTerm.Load()) {
-		serv.currentTerm.Store(int64(req.Term))
+	if req.Term > serv.currentTerm {
+		serv.currentTerm = req.Term
 		if serv.state != Follower {
 			serv.changeState(Follower)
 		} else {
@@ -37,11 +37,11 @@ func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest, addr 
 	}
 
 	// Update the response term after potential update above
-	resp.Term = int(serv.currentTerm.Load())
+	resp.Term = serv.currentTerm
 
 	// 1. Reject if the request is from a stale leader
-	if req.Term < int(serv.currentTerm.Load()) {
-		log.Printf("handleAERequest: rejected from %s, their term %d is less than ours %d\n", addr.String(), req.Term, int(serv.currentTerm.Load()))
+	if req.Term < serv.currentTerm {
+		log.Printf("handleAERequest: rejected from %s, their term %d is less than ours %d\n", addr.String(), req.Term, serv.currentTerm)
 		resp.Success = false
 		return resp
 	}
@@ -73,7 +73,7 @@ func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest, addr 
 	resp.Success = true
 
 	// 5. Advance commitIndex to match the leader's, then write newly committed entries to the log file
-	if req.LeaderCommit > int(serv.commitIndex.Load()) {
+	if req.LeaderCommit > serv.commitIndex {
 		newCommit := min(req.LeaderCommit, len(serv.log)-1)
 		serv.commitUpTo(newCommit)
 	}
@@ -91,9 +91,9 @@ func (serv *RaftServer) handleAEResponse(res miniraft.AppendEntriesResponse, add
 	}
 
 	// If the response has a higher term, we are a stale leader and must step down
-	if res.Term > int(serv.currentTerm.Load()) {
+	if res.Term > serv.currentTerm {
 		log.Printf("handleAEResponse: response from %s has higher term %d, stepping down\n", addr.String(), res.Term)
-		serv.currentTerm.Store(int64(res.Term))
+		serv.currentTerm = res.Term
 		serv.changeState(Follower)
 		return
 	}
@@ -101,9 +101,9 @@ func (serv *RaftServer) handleAEResponse(res miniraft.AppendEntriesResponse, add
 	if res.Success {
 		// Update nextIndex and matchIndex based on what we actually sent (inflightIndex)
 		// We can't just use len(log) here because new entries might have been added since we sent the request
-		lastSent := int(serv.inflightIndex[i].Load())
-		serv.nextIndex[i].Store(int64(lastSent + 1))
-		serv.matchIndex[i].Store(int64(lastSent))
+		lastSent := serv.inflightIndex[i]
+		serv.nextIndex[i] = lastSent + 1
+		serv.matchIndex[i] = lastSent
 
 		// Check if we can now commit more entries
 		serv.advanceCommitIndex()
@@ -113,10 +113,10 @@ func (serv *RaftServer) handleAEResponse(res miniraft.AppendEntriesResponse, add
 	// The follower rejected our entries, meaning its log doesn't match ours at nextIndex-1.
 	// Back up nextIndex by one and retry with a longer suffix so we find where the logs are the same.
 	log.Printf("AEResponse from %s: failed, backing up and retrying\n", addr.String())
-	if serv.nextIndex[i].Load() > 1 {
-		serv.nextIndex[i].Add(-1)
+	if serv.nextIndex[i] > 1 {
+		serv.nextIndex[i]--
 	}
-	nextIndex := int(serv.nextIndex[i].Load())
+	nextIndex := serv.nextIndex[i]
 	serv.sendAERequest(nextIndex, addr, serv.log[nextIndex:])
 }
 
@@ -126,14 +126,14 @@ func (serv *RaftServer) handleAEResponse(res miniraft.AppendEntriesResponse, add
 // Candidate's log is at least as up-to-date as reciver's log, grant vote
 func (serv *RaftServer) handleRVRequest(req miniraft.RequestVoteRequest) miniraft.RequestVoteResponse {
 	resp := miniraft.RequestVoteResponse{
-		Term: int(serv.currentTerm.Load()),
+		Term: serv.currentTerm,
 	}
 
 	// If the incoming term is higher than ours, update our term and step down to follower.
 	// Per Raft: "If RPC request or response contains term T > currentTerm:
 	// set currentTerm = T, convert to follower." Applies to ALL server roles.
-	if req.Term > int(serv.currentTerm.Load()) {
-		serv.currentTerm.Store(int64(req.Term))
+	if req.Term > serv.currentTerm {
+		serv.currentTerm = req.Term
 		if serv.state != Follower {
 			serv.changeState(Follower)
 		} else {
@@ -143,11 +143,11 @@ func (serv *RaftServer) handleRVRequest(req miniraft.RequestVoteRequest) miniraf
 	}
 
 	// Update the response term after potential update above
-	resp.Term = int(serv.currentTerm.Load())
+	resp.Term = serv.currentTerm
 
 	// 1. Deny if the candidate's term is less than ours
-	if req.Term < int(serv.currentTerm.Load()) {
-		log.Printf("handleRVRequest: denied %s, their term %d is less than ours %d\n", req.CandidateName, req.Term, int(serv.currentTerm.Load()))
+	if req.Term < serv.currentTerm {
+		log.Printf("handleRVRequest: denied %s, their term %d is less than ours %d\n", req.CandidateName, req.Term, serv.currentTerm)
 		resp.VoteGranted = false
 		return resp
 	}
@@ -185,17 +185,17 @@ func (serv *RaftServer) handleRVRequest(req miniraft.RequestVoteRequest) miniraf
 
 // TODO: change to follower if response term is higher than own.
 func (serv *RaftServer) handleRVResponse(res miniraft.RequestVoteResponse) {
-	if res.Term > int(serv.currentTerm.Load()) {
+	if res.Term > serv.currentTerm {
 		log.Printf("handleRVResponse: response has higher term %d, stepping down\n", res.Term)
-		serv.currentTerm.Store(int64(res.Term))
+		serv.currentTerm = res.Term
 		serv.changeState(Follower)
 		return
 	}
 	if !res.VoteGranted {
 		return
 	}
-	serv.votes.Add(1)
-	if (int(serv.votes.Load()) >= (len(serv.servers)/2)+1) && serv.state != Leader {
+	serv.votes++
+	if (serv.votes >= (len(serv.servers)/2)+1) && serv.state != Leader {
 		serv.changeState(Leader)
 	}
 }
@@ -211,7 +211,7 @@ func (serv *RaftServer) handleClientCommand(cmd miniraft.ClientCommand) {
 		// Append the new entry to the leader's own log
 		entry := miniraft.LogEntry{
 			Index:       len(serv.log),
-			Term:        int(serv.currentTerm.Load()),
+			Term:        serv.currentTerm,
 			CommandName: cmd.Command,
 		}
 		serv.log = append(serv.log, entry)
@@ -219,7 +219,7 @@ func (serv *RaftServer) handleClientCommand(cmd miniraft.ClientCommand) {
 
 		// Immediately send AppendEntries to all followers with the new entry
 		for i, s := range serv.servers {
-			nextIdx := int(serv.nextIndex[i].Load())
+			nextIdx := serv.nextIndex[i]
 			serv.sendAERequest(nextIdx, s, serv.log[nextIdx:])
 		}
 
@@ -243,13 +243,13 @@ func (serv *RaftServer) handleStdin(str string, oldState ServerState) ServerStat
 			fmt.Printf("%+v\n", entry)
 		}
 	case "print":
-		fmt.Printf("currentTerm: %d, votedFor: %s, state: %s, commitIndex: %d, lastApplied: %d, nextIndex:", serv.currentTerm.Load(), serv.votedFor, serverStateStr[serv.state], serv.commitIndex.Load(), serv.lastApplied.Load())
+		fmt.Printf("currentTerm: %d, votedFor: %s, state: %s, commitIndex: %d, lastApplied: %d, nextIndex:", serv.currentTerm, serv.votedFor, serverStateStr[serv.state], serv.commitIndex, serv.lastApplied)
 		for i := range serv.nextIndex {
-			fmt.Printf(" %d", serv.nextIndex[i].Load())
+			fmt.Printf(" %d", serv.nextIndex[i])
 		}
 		fmt.Printf(", matchIndex:")
 		for i := range serv.matchIndex {
-			fmt.Printf(" %d", serv.matchIndex[i].Load())
+			fmt.Printf(" %d", serv.matchIndex[i])
 		}
 		fmt.Printf("\n")
 	case "resume":

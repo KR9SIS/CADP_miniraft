@@ -8,7 +8,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	miniraft "github.com/KR9SIS/CADP_miniraft/msg_format"
@@ -34,8 +33,8 @@ func (serv *RaftServer) changeState(state ServerState) {
 		serv.state = Leader
 		serv.votedFor = ""
 		for i := range serv.servers {
-			serv.nextIndex[i].Store(int64(len(serv.log)))
-			serv.matchIndex[i].Store(0)
+			serv.nextIndex[i] = len(serv.log)
+			serv.matchIndex[i] = 0
 		}
 		go serv.sendHeartBeats()
 	}
@@ -44,14 +43,14 @@ func (serv *RaftServer) changeState(state ServerState) {
 
 func (serv *RaftServer) startElection() {
 	log.Printf("%s starting election\n", serv.id)
-	serv.currentTerm.Add(1)
-	serv.votes.Store(1)
+	serv.currentTerm++
+	serv.votes = 1
 	serv.resetTimeout()
 	serv.votedFor = serv.id
 	for _, s := range serv.servers {
 		lLE := serv.log[len(serv.log)-1]
 		rVReq := &miniraft.RequestVoteRequest{
-			Term:          int(serv.currentTerm.Load()),
+			Term:          serv.currentTerm,
 			LastLogIndex:  lLE.Index,
 			LastLogTerm:   lLE.Term,
 			CandidateName: serv.id,
@@ -71,7 +70,7 @@ func (serv *RaftServer) sendHeartBeats() {
 			return
 		}
 		for i, s := range serv.servers {
-			nextIdx := int(serv.nextIndex[i].Load())
+			nextIdx := serv.nextIndex[i]
 			// Send any pending entries, or an empty slice if the follower is up to date (heartbeat)
 			serv.sendAERequest(nextIdx, s, serv.log[nextIdx:])
 		}
@@ -106,14 +105,14 @@ func (serv *RaftServer) sendAERequest(nextIndex int, addr *net.UDPAddr, entries 
 	// Record the last index we are sending so handleAEResponse knows what the follower confirmed
 	i := serv.getServerIdx(addr.String())
 	if i != -1 {
-		serv.inflightIndex[i].Store(int64(nextIndex + len(entries) - 1))
+		serv.inflightIndex[i] = nextIndex + len(entries) - 1
 	}
 	aer := &miniraft.AppendEntriesRequest{
-		Term:         int(serv.currentTerm.Load()),
+		Term:         serv.currentTerm,
 		PrevLogIndex: nextIndex - 1,
 		PrevLogTerm:  serv.log[nextIndex-1].Term,
 		LeaderId:     serv.id,
-		LeaderCommit: int(serv.commitIndex.Load()),
+		LeaderCommit: serv.commitIndex,
 		LogEntries:   entries,
 	}
 	if len(entries) != 0 {
@@ -130,11 +129,11 @@ func (serv *RaftServer) advanceCommitIndex() {
 	majority := total/2 + 1
 
 	// Try to commit each entry starting from the one after the current commitIndex
-	for n := int(serv.commitIndex.Load()) + 1; n < len(serv.log); n++ {
+	for n := serv.commitIndex + 1; n < len(serv.log); n++ {
 		// The leader always has its own entries so we start the count at 1
 		count := 1
 		for j := range serv.servers {
-			if int(serv.matchIndex[j].Load()) >= n {
+			if serv.matchIndex[j] >= n {
 				count++
 			}
 		}
@@ -142,7 +141,7 @@ func (serv *RaftServer) advanceCommitIndex() {
 		// We can only commit entries from our own term (Raft safety rule).
 		// Old entries from previous terms get committed as a side effect when
 		// we commit a newer entry (the inner loop below writes everything up to n).
-		entryIsFromCurrentTerm := serv.log[n].Term == int(serv.currentTerm.Load())
+		entryIsFromCurrentTerm := serv.log[n].Term == serv.currentTerm
 		if count >= majority && entryIsFromCurrentTerm {
 			serv.commitUpTo(n)
 		} else {
@@ -164,13 +163,13 @@ func (serv *RaftServer) logEntry(entry miniraft.LogEntry) (err error) {
 // commitUpTo writes all entries from commitIndex+1 up to n to the log file and advances commitIndex.
 // Used by both the leader (advanceCommitIndex) and followers (handleAERequest).
 func (serv *RaftServer) commitUpTo(n int) {
-	for idx := int(serv.commitIndex.Load()) + 1; idx <= n; idx++ {
+	for idx := serv.commitIndex + 1; idx <= n; idx++ {
 		err := serv.logEntry(serv.log[idx])
 		if err != nil {
 			log.Printf("commitUpTo: error writing entry %d to log file: %v\n", idx, err)
 		}
 	}
-	serv.commitIndex.Store(int64(n))
+	serv.commitIndex = n
 	log.Printf("commitUpTo: committed up to index %d\n", n)
 }
 
@@ -268,9 +267,9 @@ func main() {
 
 	// The log starts with a dummy entry at index 0 so we can always safely access log[nextIndex-1]
 	serv.log = make([]miniraft.LogEntry, 1, 16)
-	serv.nextIndex = make([]atomic.Int64, len(servers))
-	serv.matchIndex = make([]atomic.Int64, len(servers))
-	serv.inflightIndex = make([]atomic.Int64, len(servers))
+	serv.nextIndex = make([]int, len(servers))
+	serv.matchIndex = make([]int, len(servers))
+	serv.inflightIndex = make([]int, len(servers))
 	serv.servers = servers
 
 	// filename = host-port.log

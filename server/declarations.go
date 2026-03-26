@@ -3,7 +3,6 @@ package main
 import (
 	"net"
 	"os"
-	"sync/atomic"
 	"time"
 
 	miniraft "github.com/KR9SIS/CADP_miniraft/msg_format"
@@ -29,13 +28,13 @@ type RaftServer struct {
 	state   ServerState
 
 	eTimeout   *time.Timer
-	votes      atomic.Int64
+	votes      int
 	leaderAddr *net.UDPAddr
 	// list of other servers in the cluster, used to send messages to other servers.
 	servers []*net.UDPAddr
 
 	// INFO: Persistent
-	currentTerm atomic.Int64
+	currentTerm int
 	// latest term server has seen
 	votedFor string
 	// candidateId that recieved vote in current term (or null if none)
@@ -43,17 +42,17 @@ type RaftServer struct {
 	// log entries; each entry contains command for state machine, and term when entry was recieved by leader (first index is 1)
 
 	// INFO: Volatile
-	commitIndex atomic.Int64
+	commitIndex int
 	// index of highest log entry known to be committed
-	lastApplied atomic.Int64
+	lastApplied int
 	// index of highest log entry applied to state machine
 
 	// INFO: Leader vars
-	nextIndex []atomic.Int64
+	nextIndex []int
 	// for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
-	matchIndex []atomic.Int64
+	matchIndex []int
 	// for each server, index of highest log entry known to be replicated on server
-	inflightIndex []atomic.Int64
+	inflightIndex []int
 	// for each server, the last log index we sent in the most recent AppendEntries request
 }
 
