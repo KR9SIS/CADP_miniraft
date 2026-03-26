@@ -33,8 +33,8 @@ type RaftServer struct {
 	addr      *net.UDPAddr
 	conn      *net.UDPConn
 	logFile   *os.File
-	state     ServerState
-	stateLock sync.Mutex
+	state ServerState
+	mu    sync.RWMutex
 
 	eTimeout *time.Timer
 	votes    atomic.Int64
@@ -78,10 +78,8 @@ var serverStateStr = [...]string{"Suspended", "Follower", "Candidate", "Leader"}
 // INFO:
 // Safely changes the servers state
 // Spawns extra go routines to unlock stateLock
+// changeState changes the server's state. Caller must hold serv.mu.Lock().
 func (serv *RaftServer) changeState(state ServerState) {
-	serv.stateLock.Lock()
-	defer serv.stateLock.Unlock()
-
 	switch state {
 	case Suspended:
 		serv.state = Suspended
@@ -127,11 +125,17 @@ func (serv *RaftServer) sendHeartBeats() {
 	log.Printf("%s sending heartbeats\n", serv.id)
 	ticker := time.NewTicker(time.Millisecond * 75)
 	defer ticker.Stop()
-	for serv.state == Leader {
+	for {
 		<-ticker.C
+		serv.mu.RLock()
+		if serv.state != Leader {
+			serv.mu.RUnlock()
+			return
+		}
 		for i, s := range serv.servers {
 			serv.sendAERequest(int(serv.nextIndex[i].Load()), s, []miniraft.LogEntry{})
 		}
+		serv.mu.RUnlock()
 	}
 }
 
@@ -416,6 +420,9 @@ func (serv *RaftServer) handleMsg(bMsg []byte, addr *net.UDPAddr) {
 		return
 	}
 
+	serv.mu.Lock()
+	defer serv.mu.Unlock()
+
 	switch msgType {
 	case miniraft.AppendEntriesRequestMessage:
 		resp := serv.handleAERequest(msg.Message.(miniraft.AppendEntriesRequest), addr)
@@ -445,29 +452,36 @@ func (serv *RaftServer) handleMsg(bMsg []byte, addr *net.UDPAddr) {
 
 func (serv *RaftServer) getStdin() {
 	scanner := bufio.NewScanner(os.Stdin)
-	oldState := serv.state
+	var oldState ServerState
 	for scanner.Scan() {
 		switch cmd := scanner.Text(); cmd {
 		case "log":
-			for entry := range serv.log {
+			serv.mu.RLock()
+			for _, entry := range serv.log {
 				fmt.Printf("%+v\n", entry)
 			}
+			serv.mu.RUnlock()
 		case "print":
+			serv.mu.RLock()
 			fmt.Printf("currentTerm: %d, votedFor: %s, state: %s, commitIndex: %d, lastApplied: %d, nextIndex:", serv.currentTerm.Load(), serv.votedFor, serverStateStr[serv.state], serv.commitIndex.Load(), serv.lastApplied.Load())
 			for i := range serv.nextIndex {
-				fmt.Printf(" %d", i)
+				fmt.Printf(" %d", serv.nextIndex[i].Load())
 			}
 			fmt.Printf(", matchIndex:")
 			for i := range serv.matchIndex {
-				fmt.Printf(" %d", i)
+				fmt.Printf(" %d", serv.matchIndex[i].Load())
 			}
 			fmt.Printf("\n")
-
+			serv.mu.RUnlock()
 		case "resume":
+			serv.mu.Lock()
 			serv.changeState(oldState)
+			serv.mu.Unlock()
 		case "suspend":
+			serv.mu.Lock()
 			oldState = serv.state
 			serv.changeState(Suspended)
+			serv.mu.Unlock()
 		default:
 			log.Printf("Command '%s' not regognized, valid commands are: 'log', 'print', 'resume', & 'suspend'", cmd)
 		}
@@ -498,6 +512,7 @@ func (serv *RaftServer) serve() (err error) {
 func (serv *RaftServer) electionTimeoutLoop() {
 	for {
 		<-serv.eTimeout.C
+		serv.mu.Lock()
 		switch serv.state {
 		case Follower:
 			serv.changeState(Candidate)
@@ -508,6 +523,7 @@ func (serv *RaftServer) electionTimeoutLoop() {
 			// Suspended servers don't participate in elections.
 			serv.resetTimeout()
 		}
+		serv.mu.Unlock()
 	}
 }
 
