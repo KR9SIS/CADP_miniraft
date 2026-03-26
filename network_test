@@ -2,7 +2,7 @@
 
 # run script and press C-b w to get window overview
 # C-b d to detatch
-CLIENT="./client/raftclient.go"
+CLIENT="./client/client.go"
 SERVER="./server/*"
 TMUXSESSION=RAFT
 
