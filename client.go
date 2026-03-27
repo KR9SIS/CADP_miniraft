@@ -7,8 +7,6 @@ import (
 	"net"
 	"os"
 	"regexp"
-
-	miniraft "github.com/KR9SIS/CADP_miniraft/msg_format"
 )
 
 func main() {
@@ -46,10 +44,10 @@ func main() {
 			continue
 		}
 
-		cCmd := &miniraft.ClientCommand{
+		cCmd := &ClientCommand{
 			Command: cmd,
 		}
-		rMsg := miniraft.RaftMessage{
+		rMsg := RaftMessage{
 			Message: cCmd,
 		}
 		bMsg, err := rMsg.MarshalRaftJson()

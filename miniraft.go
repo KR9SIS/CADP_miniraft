@@ -1,4 +1,4 @@
-package miniraft
+package main
 
 import (
 	"bytes"

@@ -9,8 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	miniraft "github.com/KR9SIS/CADP_miniraft/msg_format"
 )
 
 // INFO:
@@ -55,7 +53,7 @@ func (serv *RaftServer) startElection() {
 	serv.votedFor = serv.id
 	for _, s := range serv.servers {
 		lLE := serv.log[len(serv.log)-1]
-		rVReq := &miniraft.RequestVoteRequest{
+		rVReq := &RequestVoteRequest{
 			Term:          serv.currentTerm,
 			LastLogIndex:  lLE.Index,
 			LastLogTerm:   lLE.Term,
@@ -86,7 +84,7 @@ func (serv *RaftServer) getServerIdx(serverID string) int {
 }
 
 func (serv *RaftServer) sendMsg(message any, addr *net.UDPAddr) {
-	rMsg := miniraft.RaftMessage{
+	rMsg := RaftMessage{
 		Message: message,
 	}
 	bMsg, err := rMsg.MarshalRaftJson()
@@ -99,7 +97,7 @@ func (serv *RaftServer) sendMsg(message any, addr *net.UDPAddr) {
 	}
 }
 
-func (serv *RaftServer) sendAERequest(nextIndex int, addr *net.UDPAddr, entries []miniraft.LogEntry) {
+func (serv *RaftServer) sendAERequest(nextIndex int, addr *net.UDPAddr, entries []LogEntry) {
 	// Record the last index we are sending so handleAEResponse knows what the follower confirmed.
 	// Only update for actual entries, not heartbeats (empty entries), since for heartbeats
 	// the math would give nextIndex-1 which could regress the value.
@@ -107,7 +105,7 @@ func (serv *RaftServer) sendAERequest(nextIndex int, addr *net.UDPAddr, entries 
 	if i != -1 && len(entries) > 0 {
 		serv.inflightIndex[i] = nextIndex + len(entries) - 1
 	}
-	aer := &miniraft.AppendEntriesRequest{
+	aer := &AppendEntriesRequest{
 		Term:         serv.currentTerm,
 		PrevLogIndex: nextIndex - 1,
 		PrevLogTerm:  serv.log[nextIndex-1].Term,
@@ -151,7 +149,7 @@ func (serv *RaftServer) advanceCommitIndex() {
 	}
 }
 
-func (serv *RaftServer) logEntry(entry miniraft.LogEntry) (err error) {
+func (serv *RaftServer) logEntry(entry LogEntry) (err error) {
 	term := strconv.Itoa(entry.Term)
 	idx := strconv.Itoa(entry.Index)
 	if _, err := serv.logFile.Write([]byte(term + "," + idx + "," + entry.CommandName + "\n")); err != nil {
@@ -255,7 +253,7 @@ func main() {
 	}
 
 	// The log starts with a dummy entry at index 0 so we can always safely access log[nextIndex-1]
-	serv.log = make([]miniraft.LogEntry, 1, 16)
+	serv.log = make([]LogEntry, 1, 16)
 	serv.nextIndex = make([]int, len(servers))
 	serv.matchIndex = make([]int, len(servers))
 	serv.inflightIndex = make([]int, len(servers))

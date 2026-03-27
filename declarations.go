@@ -4,8 +4,6 @@ import (
 	"net"
 	"os"
 	"time"
-
-	miniraft "github.com/KR9SIS/CADP_miniraft/msg_format"
 )
 
 // 4 Bytes for header, 1296 for data
@@ -39,7 +37,7 @@ type RaftServer struct {
 	// latest term server has seen
 	votedFor string
 	// candidateId that recieved vote in current term (or null if none)
-	log []miniraft.LogEntry
+	log []LogEntry
 	// log entries; each entry contains command for state machine, and term when entry was recieved by leader (first index is 1)
 
 	// INFO: Volatile

@@ -2,8 +2,8 @@
 
 # run script and press C-b w to get window overview
 # C-b d to detatch
-CLIENT="./client/client.go"
-SERVER="./server/*"
+CLIENT="./client.go ./miniraft.go"
+SERVER="./declarations.go ./handler.go ./server.go ./miniraft.go"
 TMUXSESSION=RAFT
 
 if [[ -z "$1" ]]; then

@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-
-	miniraft "github.com/KR9SIS/CADP_miniraft/msg_format"
 )
 
 // INFO:
@@ -18,8 +16,8 @@ import (
 // 4. Append any new entries not already in the log
 // 5. If leaderCommit > commitIndex, set
 // commitIndex = min(leaderCommit, index of last new entry)
-func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest, addr *net.UDPAddr) miniraft.AppendEntriesResponse {
-	resp := miniraft.AppendEntriesResponse{
+func (serv *RaftServer) handleAERequest(req AppendEntriesRequest, addr *net.UDPAddr) AppendEntriesResponse {
+	resp := AppendEntriesResponse{
 		Term: serv.currentTerm,
 	}
 
@@ -89,7 +87,7 @@ func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest, addr 
 // handleAEResponse is called when we receive a response to an AppendEntries request we sent.
 // On success: update the follower's nextIndex and matchIndex, then check if we can commit new entries.
 // On failure: back up nextIndex by one and retry with a longer suffix of the log.
-func (serv *RaftServer) handleAEResponse(res miniraft.AppendEntriesResponse, addr *net.UDPAddr) {
+func (serv *RaftServer) handleAEResponse(res AppendEntriesResponse, addr *net.UDPAddr) {
 	i := serv.getServerIdx(addr.String())
 	if i == -1 {
 		log.Printf("handleAEResponse: unknown server %s\n", addr.String())
@@ -131,8 +129,8 @@ func (serv *RaftServer) handleAEResponse(res miniraft.AppendEntriesResponse, add
 // 1. Reply false if term < currentTerm
 // 2. If (votedFor is null or candidateId) and
 // Candidate's log is at least as up-to-date as reciver's log, grant vote
-func (serv *RaftServer) handleRVRequest(req miniraft.RequestVoteRequest) miniraft.RequestVoteResponse {
-	resp := miniraft.RequestVoteResponse{
+func (serv *RaftServer) handleRVRequest(req RequestVoteRequest) RequestVoteResponse {
+	resp := RequestVoteResponse{
 		Term: serv.currentTerm,
 	}
 
@@ -191,7 +189,7 @@ func (serv *RaftServer) handleRVRequest(req miniraft.RequestVoteRequest) miniraf
 }
 
 // TODO: change to follower if response term is higher than own.
-func (serv *RaftServer) handleRVResponse(res miniraft.RequestVoteResponse) {
+func (serv *RaftServer) handleRVResponse(res RequestVoteResponse) {
 	if res.Term > serv.currentTerm {
 		log.Printf("handleRVResponse: response has higher term %d, stepping down\n", res.Term)
 		serv.currentTerm = res.Term
@@ -212,11 +210,11 @@ func (serv *RaftServer) handleRVResponse(res miniraft.RequestVoteResponse) {
 // Follower: forwards the command to the known leader.
 // Candidate: drops the command (no leader to forward to).
 // Caller must hold serv.mu.Lock().
-func (serv *RaftServer) handleClientCommand(cmd miniraft.ClientCommand) {
+func (serv *RaftServer) handleClientCommand(cmd ClientCommand) {
 	switch serv.state {
 	case Leader:
 		// Append the new entry to the leader's own log
-		entry := miniraft.LogEntry{
+		entry := LogEntry{
 			Index:       len(serv.log),
 			Term:        serv.currentTerm,
 			CommandName: cmd.Command,
@@ -280,7 +278,7 @@ func (serv *RaftServer) handleStdin(str string, oldState ServerState) ServerStat
 func (serv *RaftServer) handleMsg(sMsg serv_msg) {
 	bMsg := sMsg.bMsg
 	addr := sMsg.addr
-	msg := &miniraft.RaftMessage{}
+	msg := &RaftMessage{}
 	msgType, err := msg.UnmarshalRaftJSON(bMsg)
 	if err != nil {
 		log.Printf("error unmarshalling json msg.\tmsg: %s\terror: %v\n", bMsg, err)
@@ -290,8 +288,8 @@ func (serv *RaftServer) handleMsg(sMsg serv_msg) {
 	// Failed servers don't respond to Raft RPCs, but
 	// they should still forward client commands to the leader
 	if serv.state == Failed {
-		if msgType == miniraft.ClientCommandMessage {
-			cmd := msg.Message.(miniraft.ClientCommand)
+		if msgType == ClientCommandMessage {
+			cmd := msg.Message.(ClientCommand)
 			if serv.leaderAddr != nil {
 				log.Printf("Failed server forwarding client command %q to leader %s\n", cmd.Command, serv.leaderAddr.String())
 				serv.sendMsg(&cmd, serv.leaderAddr)
@@ -303,22 +301,22 @@ func (serv *RaftServer) handleMsg(sMsg serv_msg) {
 	}
 
 	switch msgType {
-	case miniraft.AppendEntriesRequestMessage:
-		resp := serv.handleAERequest(msg.Message.(miniraft.AppendEntriesRequest), addr)
+	case AppendEntriesRequestMessage:
+		resp := serv.handleAERequest(msg.Message.(AppendEntriesRequest), addr)
 		serv.sendMsg(resp, addr)
 
-	case miniraft.AppendEntriesResponseMessage:
-		serv.handleAEResponse(msg.Message.(miniraft.AppendEntriesResponse), addr)
+	case AppendEntriesResponseMessage:
+		serv.handleAEResponse(msg.Message.(AppendEntriesResponse), addr)
 
-	case miniraft.RequestVoteRequestMessage:
-		resp := serv.handleRVRequest(msg.Message.(miniraft.RequestVoteRequest))
+	case RequestVoteRequestMessage:
+		resp := serv.handleRVRequest(msg.Message.(RequestVoteRequest))
 		serv.sendMsg(resp, addr)
 
-	case miniraft.RequestVoteResponseMessage:
-		serv.handleRVResponse(msg.Message.(miniraft.RequestVoteResponse))
+	case RequestVoteResponseMessage:
+		serv.handleRVResponse(msg.Message.(RequestVoteResponse))
 
-	case miniraft.ClientCommandMessage:
-		cmd := msg.Message.(miniraft.ClientCommand)
+	case ClientCommandMessage:
+		cmd := msg.Message.(ClientCommand)
 		serv.handleClientCommand(cmd)
 
 	default:
