@@ -259,9 +259,11 @@ func main() {
 	serv.inflightIndex = make([]int, len(servers))
 	serv.servers = servers
 
+	logDir := "log/"
+	err = os.MkdirAll(logDir, 0o755)
 	// filename = host-port.log
-	filename := "log/" + serv.addr.IP.String() + "-" + strconv.Itoa(serv.addr.Port) + ".log"
-	f, err := os.OpenFile(filename, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0o644)
+	filename := logDir + serv.addr.IP.String() + "-" + strconv.Itoa(serv.addr.Port) + ".log"
+	f, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		log.Fatalf("error reading %s file: %v", filename, err)
 	}
