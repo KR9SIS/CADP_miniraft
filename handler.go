@@ -249,6 +249,7 @@ func (serv *RaftServer) handleStdin(str string, oldState ServerState) ServerStat
 		for _, entry := range serv.log {
 			fmt.Printf("%+v\n", entry)
 		}
+
 	case "print":
 		var state string
 		if serv.state == Failed {
@@ -265,11 +266,14 @@ func (serv *RaftServer) handleStdin(str string, oldState ServerState) ServerStat
 			fmt.Printf(" %d", serv.matchIndex[i])
 		}
 		fmt.Printf("\n")
+
 	case "resume":
-		serv.changeState(Follower)
+		serv.changeState(oldState)
+
 	case "suspend":
 		oldState = serv.state
 		serv.changeState(Failed)
+
 	default:
 		log.Printf("Command '%s' not regognized, valid commands are: 'log', 'print', 'resume', & 'suspend'", str)
 	}
