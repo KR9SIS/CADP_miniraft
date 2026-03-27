@@ -36,6 +36,12 @@ func (serv *RaftServer) handleAERequest(req miniraft.AppendEntriesRequest, addr 
 		}
 	}
 
+	// If we're a candidate and get an AE with our same term, that means another
+	// server already won the election so we step down.
+	if serv.state == Candidate && req.Term >= serv.currentTerm {
+		serv.changeState(Follower)
+	}
+
 	// Update the response term after potential update above
 	resp.Term = serv.currentTerm
 
@@ -99,11 +105,12 @@ func (serv *RaftServer) handleAEResponse(res miniraft.AppendEntriesResponse, add
 	}
 
 	if res.Success {
-		// Update nextIndex and matchIndex based on what we actually sent (inflightIndex)
-		// We can't just use len(log) here because new entries might have been added since we sent the request
+		// Update nextIndex and matchIndex based on what we actually sent (inflightIndex).
+		// Use max() because UDP doesn't guarantee ordering, so a stale response
+		// arriving late shouldn't overwrite a higher value from a newer response.
 		lastSent := serv.inflightIndex[i]
-		serv.nextIndex[i] = lastSent + 1
-		serv.matchIndex[i] = lastSent
+		serv.nextIndex[i] = max(serv.nextIndex[i], lastSent+1)
+		serv.matchIndex[i] = max(serv.matchIndex[i], lastSent)
 
 		// Check if we can now commit more entries
 		serv.advanceCommitIndex()
@@ -244,7 +251,7 @@ func (serv *RaftServer) handleStdin(str string, oldState ServerState) ServerStat
 		}
 	case "print":
 		var state string
-		if serv.state == Suspended {
+		if serv.state == Failed {
 			state = fmt.Sprintf("%s, oldState: %s", serverStateStr[serv.state], serverStateStr[oldState])
 		} else {
 			state = serverStateStr[serv.state]
@@ -262,7 +269,7 @@ func (serv *RaftServer) handleStdin(str string, oldState ServerState) ServerStat
 		serv.changeState(oldState)
 	case "suspend":
 		oldState = serv.state
-		serv.changeState(Suspended)
+		serv.changeState(Failed)
 	default:
 		log.Printf("Command '%s' not regognized, valid commands are: 'log', 'print', 'resume', & 'suspend'", str)
 	}
@@ -280,8 +287,18 @@ func (serv *RaftServer) handleMsg(sMsg serv_msg) {
 		return
 	}
 
-	// Suspended servers receive messages but do not process or respond to them.
-	if serv.state == Suspended {
+	// Failed servers don't respond to Raft RPCs, but
+	// they should still forward client commands to the leader
+	if serv.state == Failed {
+		if msgType == miniraft.ClientCommandMessage {
+			cmd := msg.Message.(miniraft.ClientCommand)
+			if serv.leaderAddr != nil {
+				log.Printf("Failed server forwarding client command %q to leader %s\n", cmd.Command, serv.leaderAddr.String())
+				serv.sendMsg(&cmd, serv.leaderAddr)
+			} else {
+				log.Printf("Failed server has no known leader, dropping client command %q\n", cmd.Command)
+			}
+		}
 		return
 	}
 
@@ -329,9 +346,9 @@ func (serv *RaftServer) handler(c <-chan serv_msg, strChan <-chan string) {
 			case Follower, Candidate:
 				serv.changeState(Candidate)
 
-			case Leader, Suspended:
+			case Leader, Failed:
 				// Leaders send heartbeats, they don't watch the election timer.
-				// Suspended servers don't participate in elections.
+				// Failed servers don't participate in elections.
 				serv.resetTimeout()
 			}
 		}

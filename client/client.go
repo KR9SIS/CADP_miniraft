@@ -16,7 +16,7 @@ func main() {
 		log.Fatalf("Usage: %s <server host>:<server port>\n", os.Args[0])
 	}
 
-	conn, err := net.ListenPacket("udp", ":4222")
+	conn, err := net.ListenPacket("udp", ":0")
 	if err != nil {
 		log.Fatalf("Could not listen for UDP packets: %v\n", err)
 	}

@@ -60,13 +60,13 @@ type RaftServer struct {
 type ServerState int
 
 const (
-	Suspended ServerState = iota
+	Failed ServerState = iota
 	Follower
 	Candidate
 	Leader
 )
 
-var serverStateStr = [...]string{"Suspended", "Follower", "Candidate", "Leader"}
+var serverStateStr = [...]string{"Failed", "Follower", "Candidate", "Leader"}
 
 type serv_msg struct {
 	addr *net.UDPAddr

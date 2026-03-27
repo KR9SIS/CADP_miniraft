@@ -22,8 +22,8 @@ func (serv *RaftServer) changeState(state ServerState) {
 	serv.heartbeatTicker.Stop()
 
 	switch state {
-	case Suspended:
-		serv.state = Suspended
+	case Failed:
+		serv.state = Failed
 	case Follower:
 		serv.state = Follower
 		serv.votedFor = ""
@@ -101,9 +101,11 @@ func (serv *RaftServer) sendMsg(message any, addr *net.UDPAddr) {
 }
 
 func (serv *RaftServer) sendAERequest(nextIndex int, addr *net.UDPAddr, entries []miniraft.LogEntry) {
-	// Record the last index we are sending so handleAEResponse knows what the follower confirmed
+	// Record the last index we are sending so handleAEResponse knows what the follower confirmed.
+	// Only update for actual entries, not heartbeats (empty entries), since for heartbeats
+	// the math would give nextIndex-1 which could regress the value.
 	i := serv.getServerIdx(addr.String())
-	if i != -1 {
+	if i != -1 && len(entries) > 0 {
 		serv.inflightIndex[i] = nextIndex + len(entries) - 1
 	}
 	aer := &miniraft.AppendEntriesRequest{
@@ -169,6 +171,7 @@ func (serv *RaftServer) commitUpTo(n int) {
 		}
 	}
 	serv.commitIndex = n
+	serv.lastApplied = n
 	log.Printf("commitUpTo: committed up to index %d\n", n)
 }
 
@@ -261,7 +264,7 @@ func main() {
 
 	// filename = host-port.log
 	filename := "log/" + serv.addr.IP.String() + "-" + strconv.Itoa(serv.addr.Port) + ".log"
-	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(filename, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		log.Fatalf("error reading %s file: %v", filename, err)
 	}
