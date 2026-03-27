@@ -200,7 +200,9 @@ func (serv *RaftServer) handleRVResponse(res RequestVoteResponse) {
 		return
 	}
 	serv.votes++
-	if (serv.votes >= (len(serv.servers)/2)+1) && serv.state != Leader {
+	total := len(serv.servers) + 1 // all servers including self
+	majority := total/2 + 1
+	if serv.votes >= majority && serv.state != Leader {
 		serv.changeState(Leader)
 	}
 }
