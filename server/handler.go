@@ -266,7 +266,7 @@ func (serv *RaftServer) handleStdin(str string, oldState ServerState) ServerStat
 		}
 		fmt.Printf("\n")
 	case "resume":
-		serv.changeState(oldState)
+		serv.changeState(Follower)
 	case "suspend":
 		oldState = serv.state
 		serv.changeState(Failed)
