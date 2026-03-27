@@ -69,7 +69,6 @@ func (serv *RaftServer) startElection() {
 // sendHeartBeats sends a single round of AppendEntries (heartbeats or pending entries) to all followers.
 // Called from the handler event loop on each heartbeat tick, not in a separate goroutine.
 func (serv *RaftServer) sendHeartBeats() {
-	log.Printf("%s sending heartbeats\n", serv.id)
 	for i, s := range serv.servers {
 		nextIdx := serv.nextIndex[i]
 		serv.sendAERequest(nextIdx, s, serv.log[nextIdx:])
