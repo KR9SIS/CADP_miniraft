@@ -93,8 +93,9 @@ func (serv *RaftServer) handleAEResponse(res AppendEntriesResponse, addr *net.UD
 
 	if res.Success {
 		// Follower accepted, update what we know about their log
-		serv.matchIndex[i] = max(serv.matchIndex[i], serv.nextIndex[i]-1)
+		// nextIndex must be updated BEFORE matchIndex, so matchIndex reflects the new value
 		serv.nextIndex[i] = max(serv.nextIndex[i], len(serv.log))
+		serv.matchIndex[i] = max(serv.matchIndex[i], serv.nextIndex[i]-1)
 
 		// See if we can commit more entries now
 		serv.advanceCommitIndex()

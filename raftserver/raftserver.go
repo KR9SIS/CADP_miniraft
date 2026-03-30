@@ -119,23 +119,23 @@ func (serv *RaftServer) advanceCommitIndex() {
 	total := len(serv.servers) + 1 // all servers including the leader
 	majority := total/2 + 1
 
-	// Go through each uncommitted entry and see if enough servers have it
-	for n := serv.commitIndex + 1; n < len(serv.log); n++ {
-		// Count starts at 1 to include the leader itself (it always has the entry)
+	// Find the highest N from the current term that a majority has replicated (Section 5.4.2).
+	// Only entries from the leader's current term can trigger a commit by counting replicas.
+	// Once such an entry is committed, all prior entries are committed indirectly
+	// (commitUpTo writes everything from commitIndex+1 through N, including old-term entries).
+	// We search top-down so that one current-term entry with majority commits everything below it.
+	for n := len(serv.log) - 1; n > serv.commitIndex; n-- {
+		if serv.log[n].Term != serv.currentTerm {
+			continue
+		}
 		count := 1
 		for j := range serv.servers {
 			if serv.matchIndex[j] >= n {
 				count++
 			}
 		}
-
-		// We can only commit entries from our own term (Section 5.4.2).
-		// Older entries get committed along with them since commitUpTo writes everything up to n.
-		entryIsFromCurrentTerm := serv.log[n].Term == serv.currentTerm
-		if count >= majority && entryIsFromCurrentTerm {
+		if count >= majority {
 			serv.commitUpTo(n)
-		} else {
-			// Can't commit n, so no point checking higher indexes either
 			break
 		}
 	}

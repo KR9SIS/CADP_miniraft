@@ -16,7 +16,7 @@ MiniRaft is our implementation of the Raft consensus protocol (Ongaro & Ousterho
 - `AUTHORS`: Lists group members and contact information.
 - `network_test`: Bash script that launches all servers and a client in a tmux session for testing.
 - `go.mod`: Go module definition.
-- `agentLog/`: Directory containing logs of AI system interactions.
+- `agentlogs/`: Directory containing logs of AI system interactions.
 - `README`: This documentation file.
 
 ## Running the System
@@ -107,15 +107,15 @@ On the follower side, `handleAERequest()` ([handler.go:16-74](raftserver/handler
 3. **Delete conflicting entries** (rule 3) and **append new entries** (rule 4): Implemented at [handler.go:60-64](raftserver/handler.go#L60-L64). The follower truncates its log at `prevLogIndex+1` and appends the new entries, ensuring any conflicts from previous terms are resolved.
 4. **Advance commitIndex** (rule 5): Implemented at [handler.go:68-72](raftserver/handler.go#L68-L72). If `leaderCommit > commitIndex`, the follower sets its commit index to `min(leaderCommit, index of last new entry)` and writes newly committed entries to the log file via `commitUpTo()`.
 
-When the leader receives a successful response, `handleAEResponse()` ([handler.go:79-111](raftserver/handler.go#L79-L111)) conservatively sets `matchIndex` to the confirmed `prevLogIndex` (`nextIndex[i]-1`) and advances `nextIndex` to the leader's current log length, then calls `advanceCommitIndex()` to check if new entries can be committed. If `nextIndex` overshoots (because the log grew after sending), the next AppendEntries will fail the `prevLogIndex` check and self-correct. On failure, it decrements `nextIndex` by one and retries, implementing the log backtracking mechanism described in Section 5.3 of the paper.
+When the leader receives a successful response, `handleAEResponse()` ([handler.go:79-111](raftserver/handler.go#L79-L111)) first advances `nextIndex` to the leader's current log length, then sets `matchIndex` to `nextIndex[i]-1` (the index of the last entry the follower now has), and calls `advanceCommitIndex()` to check if new entries can be committed. The order matters: `nextIndex` must be updated before `matchIndex` so that `matchIndex` reflects the correct value. On failure, it decrements `nextIndex` by one and retries, implementing the log backtracking mechanism described in Section 5.3 of the paper.
 
 ### Commitment and Applying Logs
 
 A log entry is committed only when it has been replicated on a majority of servers. This logic is implemented in `advanceCommitIndex()` ([raftserver.go:118-142](raftserver/raftserver.go#L118-L142)).
 
-The function iterates through uncommitted entries starting from `commitIndex + 1`. For each index `n`, it counts how many followers have `matchIndex[j] >= n`, adding 1 for the leader itself. If the count reaches a majority (`total/2 + 1`) **and** the entry's term equals `currentTerm`, the entry is committed via `commitUpTo()`.
+The function searches backward from the end of the log to find the highest index `n` where `log[n].Term == currentTerm` and a majority of servers have `matchIndex[j] >= n` (counting the leader itself). Once found, it commits everything up to `n` via `commitUpTo()`.
 
-The term check is critical: as specified in Section 5.4.2 of the paper, a leader may only commit entries from its own term. Entries from previous terms are committed indirectly when a newer entry from the current term is committed, because `commitUpTo()` ([raftserver.go:156-166](raftserver/raftserver.go#L156-L166)) writes all entries from `commitIndex+1` up to the newly committed index. This prevents the scenario where a leader incorrectly commits an entry from an older term that could later be overwritten.
+Searching top-down is essential: as specified in Section 5.4.2 of the paper, a leader may only directly commit entries from its own term. Entries from previous terms are committed indirectly when a current-term entry above them is committed, because `commitUpTo()` ([raftserver.go:156-166](raftserver/raftserver.go#L156-L166)) writes all entries from `commitIndex+1` up to the target index. By searching from the highest index downward, a single current-term entry with majority support commits all older entries below it in one step.
 
 On followers, commitment happens when they receive an AppendEntries request with a `leaderCommit` value higher than their own `commitIndex` ([handler.go:68-72](raftserver/handler.go#L68-L72)). The follower advances its commit index to `min(leaderCommit, len(log)-1)` and writes all newly committed entries to its log file.
 
