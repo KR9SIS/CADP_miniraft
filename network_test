@@ -1,9 +1,9 @@
-#!/bin/env bash
+#!/usr/bin/env bash
 
 # run script and press C-b w to get window overview
 # C-b d to detatch
-CLIENT="./client.go ./miniraft.go"
-SERVER="./declarations.go ./handler.go ./server.go ./miniraft.go"
+CLIENT="./raftclient/raftclient.go ./raftclient/miniraft.go"
+SERVER="./raftserver/declarations.go ./raftserver/handler.go ./raftserver/raftserver.go ./raftserver/miniraft.go"
 TMUXSESSION=RAFT
 
 if [[ -z "$1" ]]; then
@@ -24,7 +24,7 @@ tmux set-option -t $TMUXSESSION mouse on
 echo "Starting Servers"
 i=0
 while IFS= read -r line; do
-  tmux new-window -t $TMUXSESSION -n "server$i" -c "$PWD" "go run $SERVER $line $1"
+  tmux new-window -t $TMUXSESSION -n "$line" -c "$PWD" "go run $SERVER $line $1 $2"
   i=$((i + 1))
 done <"$1"
 

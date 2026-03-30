@@ -6,44 +6,36 @@ import (
 	"net"
 )
 
-// INFO:
-// 1. Reply false if term < currentTerm
-// 2. Reply false if log doesn't contain an entry
-// at PrevLogIndex whose term matches PrevLogTerm
-// 3. If an existing entry conflicts with a new one
-// (same index different terms), delete the entry and
-// all that follow it.
-// 4. Append any new entries not already in the log
-// 5. If leaderCommit > commitIndex, set
-// commitIndex = min(leaderCommit, index of last new entry)
+// handleAERequest processes an incoming AppendEntries request.
+// Implements the 5 rules from Figure 2 of the Raft paper:
+//  1. Reply false if term < currentTerm
+//  2. Reply false if log doesn't have an entry at PrevLogIndex matching PrevLogTerm
+//  3. If an existing entry conflicts with a new one (same index, different term), delete it and all after
+//  4. Append any new entries not already in the log
+//  5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 func (serv *RaftServer) handleAERequest(req AppendEntriesRequest, addr *net.UDPAddr) AppendEntriesResponse {
 	resp := AppendEntriesResponse{
 		Term: serv.currentTerm,
 	}
 
-	// If the incoming term is higher than ours, update our term and step down to follower.
-	// Per Raft: "If RPC request or response contains term T > currentTerm:
-	// set currentTerm = T, convert to follower." Applies to ALL server roles.
+	// If the sender's term is higher, we update ours and become a follower (Figure 2)
 	if req.Term > serv.currentTerm {
 		serv.currentTerm = req.Term
 		if serv.state != Follower {
 			serv.changeState(Follower)
 		} else {
-			// Already a follower — just clear votedFor for the new term
-			serv.votedFor = ""
+			serv.votedFor = "" // new term, clear our vote
 		}
 	}
 
-	// If we're a candidate and get an AE with our same term, that means another
-	// server already won the election so we step down.
+	// If we're a candidate and get an AE with our term, someone else won the election
 	if serv.state == Candidate && req.Term >= serv.currentTerm {
 		serv.changeState(Follower)
 	}
 
-	// Update the response term after potential update above
 	resp.Term = serv.currentTerm
 
-	// 1. Reject if the request is from a stale leader
+	// 1. Reject if the request comes from an old term
 	if req.Term < serv.currentTerm {
 		log.Printf("handleAERequest: rejected from %s, their term %d is less than ours %d\n", addr.String(), req.Term, serv.currentTerm)
 		resp.Success = false
@@ -53,9 +45,7 @@ func (serv *RaftServer) handleAERequest(req AppendEntriesRequest, addr *net.UDPA
 	serv.resetTimeout()
 	serv.leaderAddr = addr
 
-	// 2. Reject if our log doesn't have an entry at PrevLogIndex whose term matches PrevLogTerm.
-	// This check runs for both heartbeats and real entries — a heartbeat is just an
-	// AppendEntries with an empty LogEntries array.
+	// 2. Reject if our log doesn't have a matching entry at PrevLogIndex
 	if req.PrevLogIndex > len(serv.log)-1 {
 		log.Printf("handleAERequest: rejected from %s, missing entry at PrevLogIndex %d\n", addr.String(), req.PrevLogIndex)
 		resp.Success = false
@@ -67,8 +57,7 @@ func (serv *RaftServer) handleAERequest(req AppendEntriesRequest, addr *net.UDPA
 		return resp
 	}
 
-	// 3. & 4. Truncate any conflicting entries and append the new ones.
-	// When LogEntries is empty, a heartbeat, we can skip appending.
+	// 3 & 4. Cut off any conflicting entries and append the new ones (skip if no entries)
 	if len(req.LogEntries) > 0 {
 		serv.log = append(serv.log[:req.PrevLogIndex+1], req.LogEntries...)
 		log.Printf("handleAERequest: appended %d entries from %s\n", len(req.LogEntries), addr.String())
@@ -76,7 +65,7 @@ func (serv *RaftServer) handleAERequest(req AppendEntriesRequest, addr *net.UDPA
 
 	resp.Success = true
 
-	// 5. Advance commitIndex to match the leader's, then write newly committed entries to the log file
+	// 5. Advance our commitIndex to match the leader's and write new commits to the log file
 	if req.LeaderCommit > serv.commitIndex {
 		newCommit := min(req.LeaderCommit, len(serv.log)-1)
 		serv.commitUpTo(newCommit)
@@ -84,9 +73,9 @@ func (serv *RaftServer) handleAERequest(req AppendEntriesRequest, addr *net.UDPA
 	return resp
 }
 
-// handleAEResponse is called when we receive a response to an AppendEntries request we sent.
-// On success: update the follower's nextIndex and matchIndex, then check if we can commit new entries.
-// On failure: back up nextIndex by one and retry with a longer suffix of the log.
+// handleAEResponse handles a follower's reply to our AppendEntries.
+// On success we advance their nextIndex/matchIndex and try to commit.
+// On failure we back up nextIndex by one and retry.
 func (serv *RaftServer) handleAEResponse(res AppendEntriesResponse, addr *net.UDPAddr) {
 	i := serv.getServerIdx(addr.String())
 	if i == -1 {
@@ -94,7 +83,7 @@ func (serv *RaftServer) handleAEResponse(res AppendEntriesResponse, addr *net.UD
 		return
 	}
 
-	// If the response has a higher term, we are a stale leader and must step down
+	// Higher term means we're outdated, step down
 	if res.Term > serv.currentTerm {
 		log.Printf("handleAEResponse: response from %s has higher term %d, stepping down\n", addr.String(), res.Term)
 		serv.currentTerm = res.Term
@@ -103,20 +92,16 @@ func (serv *RaftServer) handleAEResponse(res AppendEntriesResponse, addr *net.UD
 	}
 
 	if res.Success {
-		// Update nextIndex and matchIndex based on what we actually sent (inflightIndex).
-		// Use max() because UDP doesn't guarantee ordering, so a stale response
-		// arriving late shouldn't overwrite a higher value from a newer response.
-		lastSent := serv.inflightIndex[i]
-		serv.nextIndex[i] = max(serv.nextIndex[i], lastSent+1)
-		serv.matchIndex[i] = max(serv.matchIndex[i], lastSent)
+		// Follower accepted, update what we know about their log
+		serv.matchIndex[i] = max(serv.matchIndex[i], serv.nextIndex[i]-1)
+		serv.nextIndex[i] = max(serv.nextIndex[i], len(serv.log))
 
-		// Check if we can now commit more entries
+		// See if we can commit more entries now
 		serv.advanceCommitIndex()
 		return
 	}
 
-	// The follower rejected our entries, meaning its log doesn't match ours at nextIndex-1.
-	// Back up nextIndex by one and retry with a longer suffix so we find where the logs are the same.
+	// Follower rejected, back up nextIndex and retry until we find where our logs match
 	log.Printf("AEResponse from %s: failed, backing up and retrying\n", addr.String())
 	if serv.nextIndex[i] > 1 {
 		serv.nextIndex[i]--
@@ -125,32 +110,29 @@ func (serv *RaftServer) handleAEResponse(res AppendEntriesResponse, addr *net.UD
 	serv.sendAERequest(nextIndex, addr, serv.log[nextIndex:])
 }
 
-// INFO:
-// 1. Reply false if term < currentTerm
-// 2. If (votedFor is null or candidateId) and
-// Candidate's log is at least as up-to-date as reciver's log, grant vote
+// handleRVRequest processes an incoming RequestVote request.
+// From Figure 2 of the Raft paper:
+//  1. Reply false if term < currentTerm
+//  2. If votedFor is null or candidateId, and candidate's log is at least as
+//     up-to-date as receiver's log, grant vote
 func (serv *RaftServer) handleRVRequest(req RequestVoteRequest) RequestVoteResponse {
 	resp := RequestVoteResponse{
 		Term: serv.currentTerm,
 	}
 
-	// If the incoming term is higher than ours, update our term and step down to follower.
-	// Per Raft: "If RPC request or response contains term T > currentTerm:
-	// set currentTerm = T, convert to follower." Applies to ALL server roles.
+	// If the sender's term is higher, we update ours and become a follower (Figure 2)
 	if req.Term > serv.currentTerm {
 		serv.currentTerm = req.Term
 		if serv.state != Follower {
 			serv.changeState(Follower)
 		} else {
-			// Already a follower — just clear votedFor for the new term
-			serv.votedFor = ""
+			serv.votedFor = "" // new term, clear our vote
 		}
 	}
 
-	// Update the response term after potential update above
 	resp.Term = serv.currentTerm
 
-	// 1. Deny if the candidate's term is less than ours
+	// 1. Deny if the candidate's term is behind ours
 	if req.Term < serv.currentTerm {
 		log.Printf("handleRVRequest: denied %s, their term %d is less than ours %d\n", req.CandidateName, req.Term, serv.currentTerm)
 		resp.VoteGranted = false
@@ -164,9 +146,8 @@ func (serv *RaftServer) handleRVRequest(req RequestVoteRequest) RequestVoteRespo
 		return resp
 	}
 
-	// 2. Check if the candidate's log is at least as up-to-date as ours.
-	// First compare the last log term — higher term wins.
-	// If terms are equal, the longer log wins.
+	// 2. Only grant the vote if the candidate's log is at least as up-to-date as ours
+	// (compare last term first, then length)
 	ourLastIndex := len(serv.log) - 1
 	ourLastTerm := serv.log[ourLastIndex].Term
 	if req.LastLogTerm < ourLastTerm {
@@ -180,7 +161,7 @@ func (serv *RaftServer) handleRVRequest(req RequestVoteRequest) RequestVoteRespo
 		return resp
 	}
 
-	// Grant the vote and record it so we don't vote for someone else this term
+	// All checks passed, grant the vote
 	serv.votedFor = req.CandidateName
 	serv.resetTimeout()
 	resp.VoteGranted = true
@@ -188,7 +169,7 @@ func (serv *RaftServer) handleRVRequest(req RequestVoteRequest) RequestVoteRespo
 	return resp
 }
 
-// TODO: change to follower if response term is higher than own.
+// handleRVResponse processes a vote response. If we got enough votes, become leader.
 func (serv *RaftServer) handleRVResponse(res RequestVoteResponse) {
 	if res.Term > serv.currentTerm {
 		log.Printf("handleRVResponse: response has higher term %d, stepping down\n", res.Term)
@@ -211,11 +192,10 @@ func (serv *RaftServer) handleRVResponse(res RequestVoteResponse) {
 // Leader: appends the command to the log and sends AppendEntries to all followers.
 // Follower: forwards the command to the known leader.
 // Candidate: drops the command (no leader to forward to).
-// Caller must hold serv.mu.Lock().
 func (serv *RaftServer) handleClientCommand(cmd ClientCommand) {
 	switch serv.state {
 	case Leader:
-		// Append the new entry to the leader's own log
+		// Add the command to our log and replicate to followers
 		entry := LogEntry{
 			Index:       len(serv.log),
 			Term:        serv.currentTerm,
@@ -224,7 +204,7 @@ func (serv *RaftServer) handleClientCommand(cmd ClientCommand) {
 		serv.log = append(serv.log, entry)
 		log.Printf("Leader appended client command entry %d: %s\n", entry.Index, entry.CommandName)
 
-		// Immediately send AppendEntries to all followers with the new entry
+		// Send to all followers right away
 		for i, s := range serv.servers {
 			nextIdx := serv.nextIndex[i]
 			serv.sendAERequest(nextIdx, s, serv.log[nextIdx:])
@@ -243,6 +223,7 @@ func (serv *RaftServer) handleClientCommand(cmd ClientCommand) {
 	}
 }
 
+// handleStdin processes debug commands typed into the server's terminal.
 func (serv *RaftServer) handleStdin(str string, oldState ServerState) ServerState {
 	switch str {
 	case "log":
@@ -275,13 +256,14 @@ func (serv *RaftServer) handleStdin(str string, oldState ServerState) ServerStat
 		serv.changeState(Failed)
 
 	default:
-		log.Printf("Command '%s' not regognized, valid commands are: 'log', 'print', 'resume', & 'suspend'", str)
+		log.Printf("Command '%s' not recognized, valid commands are: 'log', 'print', 'resume', & 'suspend'", str)
 	}
 
 	return oldState
 }
 
-func (serv *RaftServer) handleMsg(sMsg serv_msg) {
+// handleMsg unmarshals an incoming UDP message and dispatches it to the right handler.
+func (serv *RaftServer) handleMsg(sMsg ServMsg) {
 	bMsg := sMsg.bMsg
 	addr := sMsg.addr
 	msg := &RaftMessage{}
@@ -291,9 +273,16 @@ func (serv *RaftServer) handleMsg(sMsg serv_msg) {
 		return
 	}
 
-	// Failed servers don't respond to Raft RPCs, but
-	// they should still forward client commands to the leader
+	// Failed servers ignore everything except client commands, which they forward to the leader
 	if serv.state == Failed {
+		if msgType == AppendEntriesRequestMessage {
+			if serv.leaderAddr != nil && (serv.leaderAddr.IP.Equal(addr.IP) && serv.leaderAddr.Port == addr.Port) {
+				return
+			}
+			// Remember this leader so we can forward client commands to it
+			log.Printf("Failed server storing new leader %s to forward client commands", addr.String())
+			serv.leaderAddr = addr
+		}
 		if msgType == ClientCommandMessage {
 			cmd := msg.Message.(ClientCommand)
 			if serv.leaderAddr != nil {
@@ -330,7 +319,9 @@ func (serv *RaftServer) handleMsg(sMsg serv_msg) {
 	}
 }
 
-func (serv *RaftServer) handler(c <-chan serv_msg, strChan <-chan string) {
+// handler is the main event loop. All state changes happen here in a single goroutine,
+// so we don't need any locks.
+func (serv *RaftServer) handler(c <-chan ServMsg, strChan <-chan string) {
 	var oldState ServerState
 	for {
 		select {
@@ -351,8 +342,7 @@ func (serv *RaftServer) handler(c <-chan serv_msg, strChan <-chan string) {
 				serv.changeState(Candidate)
 
 			case Leader, Failed:
-				// Leaders send heartbeats, they don't watch the election timer.
-				// Failed servers don't participate in elections.
+				// Leaders and failed servers just reset the timer, they don't start elections
 				serv.resetTimeout()
 			}
 		}

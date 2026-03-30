@@ -9,11 +9,14 @@ import (
 	"regexp"
 )
 
+// main reads commands from stdin and sends them to a Raft server over UDP.
+// The client does not wait for any response from the server.
 func main() {
 	if len(os.Args) != 2 {
 		log.Fatalf("Usage: %s <server host>:<server port>\n", os.Args[0])
 	}
 
+	// Bind to any available port so we can send UDP packets
 	conn, err := net.ListenPacket("udp", ":0")
 	if err != nil {
 		log.Fatalf("Could not listen for UDP packets: %v\n", err)
@@ -34,6 +37,7 @@ func main() {
 			break
 		}
 
+		// Reject commands with invalid characters (only letters, digits, dashes, underscores allowed)
 		m, err := regexp.Match("[^\\w\\-]", []byte(cmd))
 		if err != nil {
 			log.Printf("Error matching cmd: %s, err: %v", cmd, err)

@@ -1,0 +1,229 @@
+# MiniRaft - Distributed Consensus
+
+## Overview
+
+MiniRaft is our implementation of the Raft consensus protocol (Ongaro & Ousterhout, 2014) for the CADP course. Servers communicate over UDP and exchange JSON-encoded messages to coordinate leader election, log replication, and commitment. A cluster of servers maintains a replicated command log: clients submit string commands to any server, the elected leader appends them to its log, replicates them to a majority of followers, and once committed the entries are written to each server's persistent log file. The system tolerates server failures as long as a majority remains reachable.
+
+## File Structure
+
+- `raftserver/raftserver.go`: Entry point for the server. Initializes the server, parses the configuration file, sets up the UDP listener, and starts the event loop.
+- `raftserver/handler.go`: Core Raft logic. Handles incoming messages (AppendEntries, RequestVote, client commands), state transitions, elections, and log replication decisions.
+- `raftserver/declarations.go`: Defines the `RaftServer` struct, server states, constants (timeouts, buffer sizes), and the `LogEntry` type.
+- `raftserver/miniraft.go`: Defines all Raft message types (`AppendEntriesRequest`, `AppendEntriesResponse`, `RequestVoteRequest`, `RequestVoteResponse`, `ClientCommand`) and the JSON marshal/unmarshal logic.
+- `raftclient/raftclient.go`: A command-line client that reads user input, validates it, and sends commands to a Raft server over UDP.
+- `raftclient/miniraft.go`: Raft message type definitions, identical to `raftserver/miniraft.go` (shared protocol types).
+- `IDfile.txt`: Configuration file listing all server addresses (host:port), one per line.
+- `AUTHORS`: Lists group members and contact information.
+- `network_test`: Bash script that launches all servers and a client in a tmux session for testing.
+- `go.mod`: Go module definition.
+- `agentLog/`: Directory containing logs of AI system interactions.
+- `README`: This documentation file.
+
+## Running the System
+
+Start each server with its own identity and the configuration file:
+
+```bash
+go run ./raftserver/ <host>:<port> <server-id-file>
+```
+
+Each server must be listed in the configuration file, one per line:
+
+```
+127.0.0.1:4000
+127.0.0.1:4001
+127.0.0.1:4002
+```
+
+Start the client pointing at any server:
+
+```bash
+go run ./raftclient/ <host>:<port>
+```
+
+Then enter commands such as `insert`, `update`, or any string composed of letters, digits, underscores, or dashes. Type `exit` to quit.
+
+The included `network_test` script automates launching all servers and a client in a tmux session:
+
+```bash
+./network_test <server-id-file> [debug]
+```
+
+This requires `tmux` to be installed. The optional `debug` argument enables log output to stdout. Use `C-b w` to switch between server windows and `C-b d` to detach from the session.
+
+## Server Commands
+
+- `log`: Print all log entries.
+- `print`: Display the server's current term, leader voted for, state, commitIndex, lastApplied, nextIndex, and matchIndex.
+- `suspend`: Enter the Failed state, simulating a crash. The server receives but does not respond to any messages, nor does it send heartbeat messages.
+- `resume`: Exit the Failed state and return to the previous state.
+
+## Client Behavior
+
+The client reads user input line by line, validates that the command only contains letters, digits, dashes, and underscores, wraps it in a `ClientCommand` JSON message, and sends it via UDP to the specified server. It does not wait for acknowledgements.
+
+---
+
+# Breakdown of Raft Server Nodes
+
+## Protocol Mapping and Justification
+
+The following sections trace each component of our implementation to the protocol description in Section 5 and Figure 2 of Ongaro and Ousterhout (2014), explaining why the protocol is implemented correctly.
+
+### Leader Election
+
+Leader election ensures the cluster always has a functioning leader, even when servers fail. The process is implemented across `changeState()`, `startElection()`, `handleRVRequest()`, and `handleRVResponse()` in `handler.go` and `raftserver.go`.
+
+When a follower's election timer expires without receiving a heartbeat, the `handler()` event loop ([handler.go:339-342](raftserver/handler.go#L339-L342)) detects this and calls `changeState(Candidate)`. This transitions the server to the Candidate state, which in turn calls `startElection()` ([raftserver.go:47-64](raftserver/raftserver.go#L47-L64)).
+
+In `startElection()`, the server:
+1. Increments its `currentTerm` (Figure 2, "On conversion to candidate: increment currentTerm").
+2. Votes for itself by setting `votedFor = serv.id` and `votes = 1`.
+3. Resets its election timer.
+4. Sends `RequestVoteRequest` messages to all other servers, including its `currentTerm`, `lastLogIndex`, and `lastLogTerm` so recipients can evaluate log recency.
+
+As described in Section 5.2 of the paper, a candidate must gather a majority of votes to be elected. `startElection()` kicks off this process by sending vote requests to all other servers; the actual vote counting then happens in `handleRVResponse()` as responses arrive.
+
+Incoming vote requests are handled by `handleRVRequest()` ([handler.go:118-170](raftserver/handler.go#L118-L170)). This function:
+1. Rejects the request if `req.Term < currentTerm` (Figure 2, RequestVote rule 1).
+2. Checks the `votedFor` field to ensure the server only votes once per term, preventing *split-brain* scenarios.
+3. Compares the candidate's log against its own: the candidate's last log term must be at least as high, and if equal, the candidate's log must be at least as long (Section 5.4.1, election restriction). This guarantees that only candidates with the most up-to-date logs can become leader.
+4. If all checks pass, grants the vote and resets its election timer.
+
+Vote responses are processed by `handleRVResponse()` ([handler.go:173-189](raftserver/handler.go#L173-L189)). Once a candidate accumulates votes from a majority of the cluster (`total/2 + 1`, where `total = len(serv.servers) + 1`), it transitions to Leader via `changeState(Leader)`. If a response carries a higher term, the candidate steps down to Follower immediately (Figure 2, "All Servers" rule: "If response contains term T > currentTerm, set currentTerm = T, convert to follower").
+
+Upon becoming leader, `changeState(Leader)` ([raftserver.go:31-42](raftserver/raftserver.go#L31-L42)) initializes `nextIndex[i]` to the end of the leader's log and `matchIndex[i]` to 0 for every follower, exactly as specified in Figure 2. These values are reset fresh every time a new leader is elected. It then starts the heartbeat ticker and sends an immediate first heartbeat so followers learn of the new leader without waiting a full heartbeat interval.
+
+### Log Replication
+
+Once a leader is elected, it replicates log entries to followers using AppendEntries messages. This is implemented in `sendHeartBeats()`, `sendAERequest()`, `handleAERequest()`, and `handleAEResponse()`.
+
+The leader periodically sends AppendEntries messages to all followers via `sendHeartBeats()` ([raftserver.go:68-73](raftserver/raftserver.go#L68-L73)), called on every heartbeat tick from the event loop ([handler.go:334-337](raftserver/handler.go#L334-L337)). For each follower `i`, it sends all log entries starting from `nextIndex[i]`. If there are no new entries, the message serves as a heartbeat. Each request includes the leader's `currentTerm`, `leaderId`, `prevLogIndex`, `prevLogTerm`, `leaderCommit`, and the entries to append, matching Figure 2's AppendEntries arguments exactly.
+
+On the follower side, `handleAERequest()` ([handler.go:16-74](raftserver/handler.go#L16-L74)) processes incoming AppendEntries requests by following the five rules from Figure 2:
+
+1. **Reply false if `term < currentTerm`** (rule 1): Implemented at [handler.go:38-43](raftserver/handler.go#L38-L43). Stale leaders are rejected.
+2. **Reply false if log doesn't contain an entry at `prevLogIndex` with matching `prevLogTerm`** (rule 2): Implemented at [handler.go:48-58](raftserver/handler.go#L48-L58). This ensures the follower's log is consistent with the leader's up to the point of the new entries.
+3. **Delete conflicting entries** (rule 3) and **append new entries** (rule 4): Implemented at [handler.go:60-64](raftserver/handler.go#L60-L64). The follower truncates its log at `prevLogIndex+1` and appends the new entries, ensuring any conflicts from previous terms are resolved.
+4. **Advance commitIndex** (rule 5): Implemented at [handler.go:68-72](raftserver/handler.go#L68-L72). If `leaderCommit > commitIndex`, the follower sets its commit index to `min(leaderCommit, index of last new entry)` and writes newly committed entries to the log file via `commitUpTo()`.
+
+When the leader receives a successful response, `handleAEResponse()` ([handler.go:79-111](raftserver/handler.go#L79-L111)) conservatively sets `matchIndex` to the confirmed `prevLogIndex` (`nextIndex[i]-1`) and advances `nextIndex` to the leader's current log length, then calls `advanceCommitIndex()` to check if new entries can be committed. If `nextIndex` overshoots (because the log grew after sending), the next AppendEntries will fail the `prevLogIndex` check and self-correct. On failure, it decrements `nextIndex` by one and retries, implementing the log backtracking mechanism described in Section 5.3 of the paper.
+
+### Commitment and Applying Logs
+
+A log entry is committed only when it has been replicated on a majority of servers. This logic is implemented in `advanceCommitIndex()` ([raftserver.go:118-142](raftserver/raftserver.go#L118-L142)).
+
+The function iterates through uncommitted entries starting from `commitIndex + 1`. For each index `n`, it counts how many followers have `matchIndex[j] >= n`, adding 1 for the leader itself. If the count reaches a majority (`total/2 + 1`) **and** the entry's term equals `currentTerm`, the entry is committed via `commitUpTo()`.
+
+The term check is critical: as specified in Section 5.4.2 of the paper, a leader may only commit entries from its own term. Entries from previous terms are committed indirectly when a newer entry from the current term is committed, because `commitUpTo()` ([raftserver.go:156-166](raftserver/raftserver.go#L156-L166)) writes all entries from `commitIndex+1` up to the newly committed index. This prevents the scenario where a leader incorrectly commits an entry from an older term that could later be overwritten.
+
+On followers, commitment happens when they receive an AppendEntries request with a `leaderCommit` value higher than their own `commitIndex` ([handler.go:68-72](raftserver/handler.go#L68-L72)). The follower advances its commit index to `min(leaderCommit, len(log)-1)` and writes all newly committed entries to its log file.
+
+All committed entries are written to a local file named `<host>-<port>.log` in the format `term,index,command`, one entry per line. This file serves as the replicated state machine output. The `commitUpTo()` function iterates from `commitIndex+1` to the target index, writing each entry in order so that the log file always reflects the correct sequence.
+
+### Safety and Term Management
+
+Safety in Raft is guaranteed through strict handling of term numbers. In our implementation, every handler that processes a message checks the incoming term against `currentTerm`:
+
+- In `handleAERequest()` ([handler.go:22-29](raftserver/handler.go#L22-L29)): If `req.Term > currentTerm`, the server updates its term and steps down to Follower.
+- In `handleRVRequest()` ([handler.go:123-131](raftserver/handler.go#L123-L131)): Same logic, higher term causes immediate step-down.
+- In `handleAEResponse()` ([handler.go:87-92](raftserver/handler.go#L87-L92)): If a response carries a higher term, the leader steps down.
+- In `handleRVResponse()` ([handler.go:174-178](raftserver/handler.go#L174-L178)): Same for vote responses.
+
+This implements the "All Servers" rule from Figure 2: "If request or response contains term T > currentTerm: set currentTerm = T, convert to follower." Since every handler checks for this, terms can only go up and never backwards.
+
+When stepping down to Follower, `votedFor` is always cleared (either explicitly or via `changeState(Follower)` at [raftserver.go:25](raftserver/raftserver.go#L25)), ensuring votes are not incorrectly carried over between terms. This maintains the invariant that at most one leader can be elected per term.
+
+Additionally, when a Candidate receives an AppendEntries message with a term equal to or greater than its own ([handler.go:32-34](raftserver/handler.go#L32-L34)), it immediately steps down. This prevents a situation where two servers believe they are leader simultaneously, if another server is sending AppendEntries in the same term, it has already won the election.
+
+### Client Requests and Log Flow
+
+Client commands are handled by `handleClientCommand()` ([handler.go:195-224](raftserver/handler.go#L195-L224)). This function routes commands based on the server's current role:
+
+- **Leader**: Appends the command to its own log as a new `LogEntry` with the current term and the next available index, then immediately sends AppendEntries messages to all followers to begin replication ([handler.go:197-211](raftserver/handler.go#L197-L211)).
+- **Follower**: Forwards the command to the known leader via `sendMsg()` ([handler.go:213-219](raftserver/handler.go#L213-L219)). This implements the redirection pattern described in Section 5.1 of the paper, where followers proxy client requests to the leader rather than rejecting them.
+- **Candidate**: Drops the command ([handler.go:221-223](raftserver/handler.go#L221-L223)), since there is no known leader to forward to.
+- **Failed**: Forwards the command to the known leader if one is known ([handler.go:286-294](raftserver/handler.go#L286-L294)).
+
+No confirmation is sent back to the client. The command is appended to the leader's log, replicated to followers, and eventually committed and written to the log file.
+
+## Request-Response Tracking
+
+Our implementation tracks requests and responses to ensure each node eventually answers most requests, despite UDP's unreliable delivery.
+
+**Leader to followers (AppendEntries):** The leader maintains `nextIndex[i]` and `matchIndex[i]` for each follower ([declarations.go:41-42](raftserver/declarations.go#L41-L42)). On every heartbeat tick (every 75ms), the leader sends AppendEntries messages to all followers containing entries from `nextIndex[i]` onward ([raftserver.go:68-73](raftserver/raftserver.go#L68-L73)). This means even if a response is lost, the leader will resend the same entries on the next heartbeat. When a successful response arrives, `nextIndex` and `matchIndex` are advanced ([handler.go:96-98](raftserver/handler.go#L96-L98)). When a failure response arrives (log inconsistency), `nextIndex` is decremented and the request is retried immediately with a longer log suffix ([handler.go:104-110](raftserver/handler.go#L104-L110)).
+
+This retry-on-every-heartbeat design ensures that even if UDP drops packets, the leader will keep resending until the follower acknowledges. The follower's `handleAERequest()` is idempotent, receiving the same entries twice simply overwrites the same log positions with the same data.
+
+**Candidates during elections (RequestVote):** If an election times out without achieving a majority (the election timer fires again at [handler.go:339-342](raftserver/handler.go#L339-L342)), the candidate starts a new election with an incremented term, sending fresh `RequestVoteRequest` messages to all servers. This handles the case where vote requests or responses were lost.
+
+**Followers responding to requests:** Followers send a response every time they receive an AppendEntries or RequestVote request ([handler.go:300-301](raftserver/handler.go#L300-L301) and [307-308](raftserver/handler.go#L307-L308)), so they don't need any retry logic.
+
+**Client commands:** Followers and Failed servers forward client commands to the leader ([handler.go:213-219](raftserver/handler.go#L213-L219), [286-294](raftserver/handler.go#L286-L294)). Since the client uses UDP and does not wait for acknowledgements, some commands may be lost if packets are dropped or the leader crashes before committing. This is expected, as the assignment states that it is okay if not all client commands are committed.
+
+The combination of periodic heartbeats (which double as retries), immediate retries on failure, and election restarts on timeout ensures that the system makes progress and eventually processes requests as long as a majority of servers are reachable.
+
+## Heartbeat and Election Mechanism
+
+The heartbeat mechanism maintains leader authority and prevents unnecessary elections. It is implemented using Go's `time.Ticker` and `time.Timer`, coordinated through the single event loop in `handler()`.
+
+**Heartbeat timing:** The leader sends heartbeats at a fixed interval of 75ms, defined by `heartbeatTimeout` in [declarations.go:13](raftserver/declarations.go#L13). This is implemented via `serv.heartbeatTicker`, a `time.Ticker` that fires every 75ms. On each tick, the event loop calls `sendHeartBeats()` ([handler.go:334-337](raftserver/handler.go#L334-L337)), which sends an AppendEntries message to every follower. If a follower has pending entries, they are included; otherwise the message is empty and serves purely as a heartbeat.
+
+When a server becomes leader via `changeState(Leader)` ([raftserver.go:31-42](raftserver/raftserver.go#L31-L42)), the heartbeat ticker is reset and an immediate first heartbeat is sent via `sendHeartBeats()`. This ensures followers learn of the new leader immediately, without waiting up to 75ms for the first tick.
+
+**Election timeout:** Each follower maintains a randomized election timer `serv.eTimeout`. The timeout duration is chosen uniformly at random between `minElectionTimeout` (225ms = 3 x 75ms) and `maxElectionTimeout` (450ms = 6 x 75ms), as set in [declarations.go:14-15](raftserver/declarations.go#L14-L15) and implemented in `resetTimeout()` ([raftserver.go:202-205](raftserver/raftserver.go#L202-L205)).
+
+The minimum election timeout is set to 3x the heartbeat interval, so a follower will receive several heartbeats before its election timer could expire. This satisfies the timing requirement from Section 5.6 of the paper: `broadcastTime << electionTimeout << MTBF`.
+
+**How elections are triggered:** The election timer is monitored in the `handler()` event loop ([handler.go:339-348](raftserver/handler.go#L339-L348)). When the timer fires:
+- If the server is a Follower or Candidate, it transitions to Candidate and starts a new election via `changeState(Candidate)`.
+- If the server is a Leader, it simply resets the timer.
+- If the server is Failed, it resets the timer (suspended servers do not participate in elections).
+
+**Timer resets:** The election timer is reset whenever a follower receives a valid AppendEntries request from the current leader ([handler.go:45](raftserver/handler.go#L45)), grants a vote to a candidate ([handler.go:166](raftserver/handler.go#L166)), or transitions to a new state via `changeState()` ([raftserver.go:26](raftserver/raftserver.go#L26)). This ensures that as long as the leader is alive and reachable, followers keep resetting their timers and never start an election. If the leader crashes or becomes partitioned, followers stop receiving heartbeats, their timers expire at different randomized times, and the first to expire starts a new election.
+
+The randomization of election timeouts is essential for avoiding split votes. If two followers time out simultaneously and both become candidates, they might split the vote. Randomization makes simultaneous timeouts unlikely, ensuring that typically one server starts its election before others, wins quickly, and begins sending heartbeats to suppress further elections.
+
+## Progress and Deadlock Freedom
+
+### Progress Guarantees
+
+The system guarantees progress as long as a majority of servers are alive and can communicate, which is the fundamental liveness property of Raft.
+
+**Leader election always eventually succeeds:** If the current leader fails, followers' election timers will expire (since no heartbeats arrive). Due to randomized timeouts, one follower will typically time out before the others and start an election. With a majority of servers alive, it will collect enough votes and become leader. If a split vote occurs (unlikely due to randomization), the election times out and a new election begins with fresh randomized timeouts, making repeated splits very unlikely.
+
+**Committed entries are durable:** Once an entry is committed (replicated on a majority), any future leader must have that entry in its log. This is guaranteed by the election restriction in `handleRVRequest()` ([handler.go:149-162](raftserver/handler.go#L149-L162)): a candidate can only win if its log is at least as up-to-date as a majority's. Since the committed entry exists on a majority, at least one voter in any future election will have it, and will deny its vote to any candidate without it.
+
+**Client commands make progress:** When a client sends a command and a leader exists, the leader appends it and begins replication immediately. The periodic heartbeat mechanism ensures retransmission every 75ms until followers acknowledge. Once a majority acknowledge, the entry is committed and applied. If the leader fails mid-replication, the new leader will either have the entry (and eventually commit it) or not.
+
+### Deadlock Freedom
+
+Our implementation achieves deadlock freedom through a **single-goroutine event loop** architecture, which eliminates the possibility of deadlocks by design.
+
+**Single event loop, no shared mutable state:** All Raft state mutations occur in one goroutine: the `handler()` function ([handler.go:324-350](raftserver/handler.go#L324-L350)). This goroutine uses a `select` statement to process events from four sources:
+1. Network messages arriving on the `sMsgChan` channel
+2. Stdin commands arriving on the `strChan` channel
+3. Heartbeat ticks from `serv.heartbeatTicker.C`
+4. Election timeout from `serv.eTimeout.C`
+
+Since only one goroutine ever reads or writes the server's state (`currentTerm`, `votedFor`, `state`, `log`, `commitIndex`, `nextIndex`, `matchIndex`, etc.), there are no concurrent accesses and therefore **no locks are needed**. Without locks, there can be no lock-ordering violations, no priority inversion, and no deadlocks from circular waits.
+
+**Non-blocking communication:** The two other goroutines in the system are:
+- `serve()` ([raftserver.go:177-199](raftserver/raftserver.go#L177-L199)): Reads UDP packets and sends them to `sMsgChan`. This goroutine never touches Raft state.
+- `getStdin()` ([raftserver.go:169-174](raftserver/raftserver.go#L169-L174)): Reads stdin lines and sends them to `stdinChan`. This goroutine never touches Raft state.
+
+Both producer goroutines communicate with the handler exclusively through channels. Neither goroutine depends on output from the handler, so there is no circular dependency.
+
+---
+
+# Breakdown of Raft Client Nodes
+
+## Progress and Deadlock Freedom
+
+The client (raftclient/raftclient.go) is implemented as a simple sequential loop: read input, validate, send, repeat. It cannot deadlock because:
+
+1. **No blocking waits on the server:** The client sends commands via UDP using `conn.WriteTo()`, which returns immediately regardless of whether the server receives the message. The client never waits for a response or acknowledgement.
+2. **No shared state or locks:** The client is a single-goroutine program with no concurrency primitives. There are no mutexes, channels, or goroutines that could create circular dependencies.
+3. **No dependency on server state:** The client operates independently. If the server is down, unreachable, or slow, the UDP send either succeeds or fails with an error that is logged and skipped. The client always returns to the input prompt.
+
+ 

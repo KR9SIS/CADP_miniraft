@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"io"
 	"log"
 	"math/rand"
 	"net"
@@ -11,12 +12,9 @@ import (
 	"time"
 )
 
-// INFO:
-// Safely changes the servers state
-// Spawns extra go routines to unlock stateLock
-// changeState changes the server's state. Caller must hold serv.mu.Lock().
+// changeState transitions the server to a new state and handles any setup needed.
 func (serv *RaftServer) changeState(state ServerState) {
-	// Stop the heartbeat ticker whenever leaving Leader state
+	// Always stop heartbeats first, only restart them if we become leader
 	serv.heartbeatTicker.Stop()
 
 	switch state {
@@ -32,19 +30,20 @@ func (serv *RaftServer) changeState(state ServerState) {
 		serv.startElection()
 	case Leader:
 		serv.state = Leader
+		serv.leaderAddr = nil
 		serv.votedFor = ""
 		for i := range serv.servers {
 			serv.nextIndex[i] = len(serv.log)
 			serv.matchIndex[i] = 0
 		}
 		serv.heartbeatTicker.Reset(time.Millisecond * heartbeatTimeout)
-		// Send the first heartbeat right away so followers know we're the leader
-		// instead of waiting 75ms for the ticker to fire
+		// Send a heartbeat right away so followers know we're the new leader
 		serv.sendHeartBeats()
 	}
 	log.Printf("Changed %s state to %s\n", serv.id, serverStateStr[serv.state])
 }
 
+// startElection increments our term, votes for ourselves, and asks all other servers for their vote.
 func (serv *RaftServer) startElection() {
 	log.Printf("%s starting election\n", serv.id)
 	serv.currentTerm++
@@ -64,8 +63,8 @@ func (serv *RaftServer) startElection() {
 	}
 }
 
-// sendHeartBeats sends a single round of AppendEntries (heartbeats or pending entries) to all followers.
-// Called from the handler event loop on each heartbeat tick, not in a separate goroutine.
+// sendHeartBeats sends AppendEntries to all followers. If there are pending entries they
+// get included, otherwise it's just an empty heartbeat.
 func (serv *RaftServer) sendHeartBeats() {
 	for i, s := range serv.servers {
 		nextIdx := serv.nextIndex[i]
@@ -73,7 +72,7 @@ func (serv *RaftServer) sendHeartBeats() {
 	}
 }
 
-// Returns the index of the server with the given "host:port" ID in the servers slice, or -1 if not found.
+// getServerIdx finds a server's index in our servers list by its "host:port" string, returns -1 if not found.
 func (serv *RaftServer) getServerIdx(serverID string) int {
 	for i, s := range serv.servers {
 		if s.String() == serverID {
@@ -83,6 +82,7 @@ func (serv *RaftServer) getServerIdx(serverID string) int {
 	return -1
 }
 
+// sendMsg marshals a message to JSON and sends it over UDP.
 func (serv *RaftServer) sendMsg(message any, addr *net.UDPAddr) {
 	rMsg := RaftMessage{
 		Message: message,
@@ -97,14 +97,8 @@ func (serv *RaftServer) sendMsg(message any, addr *net.UDPAddr) {
 	}
 }
 
+// sendAERequest builds and sends an AppendEntries request to a single follower.
 func (serv *RaftServer) sendAERequest(nextIndex int, addr *net.UDPAddr, entries []LogEntry) {
-	// Record the last index we are sending so handleAEResponse knows what the follower confirmed.
-	// Only update for actual entries, not heartbeats (empty entries), since for heartbeats
-	// the math would give nextIndex-1 which could regress the value.
-	i := serv.getServerIdx(addr.String())
-	if i != -1 && len(entries) > 0 {
-		serv.inflightIndex[i] = nextIndex + len(entries) - 1
-	}
 	aer := &AppendEntriesRequest{
 		Term:         serv.currentTerm,
 		PrevLogIndex: nextIndex - 1,
@@ -119,16 +113,15 @@ func (serv *RaftServer) sendAERequest(nextIndex int, addr *net.UDPAddr, entries 
 	serv.sendMsg(aer, addr)
 }
 
-// advanceCommitIndex checks if any new log entries can be committed.
-// advanceCommitIndex checks if any new log entries can be committed.
-// An entry is committed when a majority of servers have it in their log.
+// advanceCommitIndex checks if any new entries can be committed.
+// An entry is committed when a majority of servers have it.
 func (serv *RaftServer) advanceCommitIndex() {
 	total := len(serv.servers) + 1 // all servers including the leader
 	majority := total/2 + 1
 
-	// Try to commit each entry starting from the one after the current commitIndex
+	// Go through each uncommitted entry and see if enough servers have it
 	for n := serv.commitIndex + 1; n < len(serv.log); n++ {
-		// The leader always has its own entries so we start the count at 1
+		// Count starts at 1 to include the leader itself (it always has the entry)
 		count := 1
 		for j := range serv.servers {
 			if serv.matchIndex[j] >= n {
@@ -136,9 +129,8 @@ func (serv *RaftServer) advanceCommitIndex() {
 			}
 		}
 
-		// We can only commit entries from our own term (Raft safety rule).
-		// Old entries from previous terms get committed as a side effect when
-		// we commit a newer entry (the inner loop below writes everything up to n).
+		// We can only commit entries from our own term (Section 5.4.2).
+		// Older entries get committed along with them since commitUpTo writes everything up to n.
 		entryIsFromCurrentTerm := serv.log[n].Term == serv.currentTerm
 		if count >= majority && entryIsFromCurrentTerm {
 			serv.commitUpTo(n)
@@ -149,6 +141,7 @@ func (serv *RaftServer) advanceCommitIndex() {
 	}
 }
 
+// logEntry writes a single entry to the log file in "term,index,command" format.
 func (serv *RaftServer) logEntry(entry LogEntry) (err error) {
 	term := strconv.Itoa(entry.Term)
 	idx := strconv.Itoa(entry.Index)
@@ -158,8 +151,8 @@ func (serv *RaftServer) logEntry(entry LogEntry) (err error) {
 	return nil
 }
 
-// commitUpTo writes all entries from commitIndex+1 up to n to the log file and advances commitIndex.
-// Used by both the leader (advanceCommitIndex) and followers (handleAERequest).
+// commitUpTo writes entries from commitIndex+1 up to n to the log file.
+// Used by the leader (via advanceCommitIndex) and followers (via handleAERequest).
 func (serv *RaftServer) commitUpTo(n int) {
 	for idx := serv.commitIndex + 1; idx <= n; idx++ {
 		err := serv.logEntry(serv.log[idx])
@@ -172,6 +165,7 @@ func (serv *RaftServer) commitUpTo(n int) {
 	log.Printf("commitUpTo: committed up to index %d\n", n)
 }
 
+// getStdin reads lines from stdin and sends them to the handler through a channel.
 func (serv *RaftServer) getStdin(c chan<- string) {
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
@@ -179,7 +173,8 @@ func (serv *RaftServer) getStdin(c chan<- string) {
 	}
 }
 
-func (serv *RaftServer) serve(c chan<- serv_msg) (err error) {
+// serve listens for incoming UDP messages and forwards them to the handler through a channel.
+func (serv *RaftServer) serve(c chan<- ServMsg) (err error) {
 	serverConn, err := net.ListenUDP("udp", serv.addr)
 	if err != nil {
 		log.Fatalf("failed to listen on port %d: %v\n", serv.addr.Port, err)
@@ -191,10 +186,10 @@ func (serv *RaftServer) serve(c chan<- serv_msg) (err error) {
 	for {
 		n, addr, err := serverConn.ReadFromUDP(buffer)
 		if err != nil {
-			log.Printf("error recvieving %d bytes from %s: %v\n", n, addr, err)
+			log.Printf("error receiving %d bytes from %s: %v\n", n, addr, err)
 			continue
 		}
-		sMsg := serv_msg{
+		sMsg := ServMsg{
 			addr: addr,
 			bMsg: make([]byte, n),
 		}
@@ -203,6 +198,7 @@ func (serv *RaftServer) serve(c chan<- serv_msg) (err error) {
 	}
 }
 
+// resetTimeout sets the election timer to a random duration between min and max election timeout.
 func (serv *RaftServer) resetTimeout() {
 	timeout := rand.Intn(maxElectionTimeout-minElectionTimeout) + minElectionTimeout
 	d := time.Duration(timeout) * time.Millisecond
@@ -210,7 +206,7 @@ func (serv *RaftServer) resetTimeout() {
 }
 
 func main() {
-	if len(os.Args) != 3 {
+	if len(os.Args) < 3 {
 		log.Fatalf("Usage: %s <host>:<port> <server id file>\n", os.Args[0])
 	}
 	id := os.Args[1]
@@ -252,16 +248,15 @@ func main() {
 		log.Fatalf("\"%s\" must be in %s\nContents of %s:\n%s\n", id, file, file, data)
 	}
 
-	// The log starts with a dummy entry at index 0 so we can always safely access log[nextIndex-1]
+	// Start with a dummy entry at index 0 so log[prevLogIndex] never goes out of bounds
 	serv.log = make([]LogEntry, 1, 16)
 	serv.nextIndex = make([]int, len(servers))
 	serv.matchIndex = make([]int, len(servers))
-	serv.inflightIndex = make([]int, len(servers))
 	serv.servers = servers
 
 	logDir := "log/"
 	err = os.MkdirAll(logDir, 0o755)
-	// filename = host-port.log
+	// Log file named host-port.log, e.g. "127.0.0.1-4000.log"
 	filename := logDir + serv.addr.IP.String() + "-" + strconv.Itoa(serv.addr.Port) + ".log"
 	f, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -270,9 +265,14 @@ func main() {
 	defer f.Close()
 	serv.logFile = f
 
+	if len(os.Args) != 4 {
+		log.SetOutput(io.Discard)
+	} else if len(os.Args) == 4 && os.Args[3] != "debug" {
+		log.SetOutput(os.Stdout)
+	}
 	log.Printf("%+v\n", serv)
 
-	sMsgChan := make(chan serv_msg, 100)
+	sMsgChan := make(chan ServMsg, 100)
 	stdinChan := make(chan string)
 
 	go serv.handler(sMsgChan, stdinChan)
